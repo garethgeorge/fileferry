@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/garethgeorge/fileferry/compare/v1.0.0...v1.1.0) (2026-07-02)
+
+
+### Features
+
+* support environment variable configuration and update README.md ([68d3b9a](https://github.com/garethgeorge/fileferry/commit/68d3b9a852a81fdf57d7ff3098f956a7940e11d8))
+
+
+### Bug Fixes
+
+* simplify media serving, makes it easier to embed images / videos ([7ed8b88](https://github.com/garethgeorge/fileferry/commit/7ed8b88892f12422469d61d212c754977a186af3))
+
 ## 1.0.0 (2026-07-02)
 
 
