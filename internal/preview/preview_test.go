@@ -85,53 +85,6 @@ func TestTextServeHTTP(t *testing.T) {
 	}
 }
 
-func TestMediaMatches(t *testing.T) {
-	p := NewMedia()
-
-	cases := []struct {
-		name string
-		f    File
-		want bool
-	}{
-		{"video", File{Ext: "mp4", MimeType: "video/mp4"}, true},
-		{"audio", File{Ext: "mp3", MimeType: "audio/mpeg"}, true},
-		{"image", File{Ext: "png", MimeType: "image/png"}, true},
-		{"text", File{Ext: "txt", MimeType: "text/plain; charset=utf-8"}, false},
-		{"binary", File{Ext: "bin", MimeType: "application/octet-stream"}, false},
-	}
-	for _, tc := range cases {
-		if got := p.Matches(tc.f); got != tc.want {
-			t.Errorf("%s: Matches = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-func TestMediaServeHTTP(t *testing.T) {
-	p := NewMedia()
-	f := File{ID: "ap-abc123-clip.mp4", Ext: "mp4", MimeType: "video/mp4"}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/"+f.ID, nil)
-	if err := p.ServeHTTP(rec, req, f); err != nil {
-		t.Fatalf("ServeHTTP error: %v", err)
-	}
-
-	res := rec.Result()
-	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("Content-Type = %q, want text/html", ct)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "<video") {
-		t.Errorf("body missing <video> element:\n%s", body)
-	}
-	if !strings.Contains(body, "/"+f.ID+"?raw=1") {
-		t.Errorf("body missing raw media source")
-	}
-	if !strings.Contains(body, `type="video/mp4"`) {
-		t.Errorf("body missing bare mime type on <source>")
-	}
-}
-
 func TestMarkdownMatches(t *testing.T) {
 	p := NewMarkdown()
 
@@ -311,9 +264,8 @@ func serveArchive(t *testing.T, id, ext string, data []byte) string {
 func TestRegistryFind(t *testing.T) {
 	md := NewMarkdown()
 	txt := NewText()
-	med := NewMedia()
 	arc := NewArchive()
-	reg := NewRegistry(md, txt, med, arc)
+	reg := NewRegistry(md, txt, arc)
 
 	nonMatch := File{Ext: "bin", MimeType: "application/octet-stream", Size: 10}
 	if got := reg.Find(nonMatch); got != nil {
@@ -325,9 +277,10 @@ func TestRegistryFind(t *testing.T) {
 		t.Errorf("Find(matching) = %v, want text previewer", got)
 	}
 
+	// Media types have no previewer; they fall through to raw serving.
 	video := File{Ext: "mp4", MimeType: "video/mp4"}
-	if got := reg.Find(video); got != med {
-		t.Errorf("Find(video) = %v, want media previewer", got)
+	if got := reg.Find(video); got != nil {
+		t.Errorf("Find(video) = %v, want nil (served raw)", got)
 	}
 
 	zipFile := File{Ext: "zip", MimeType: "application/zip", Size: 1000}
