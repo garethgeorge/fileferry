@@ -7,82 +7,81 @@ import (
 	"time"
 )
 
-func TestEncodeWeek(t *testing.T) {
+func TestEncodeDay(t *testing.T) {
 	cases := []struct {
-		week int
+		day  int
 		want string
 	}{
-		{0, "00"},
-		{31, "0z"},
-		{32, "10"},
-		{1023, "zz"},
+		{0, "000"},
+		{31, "00z"},
+		{32, "010"},
+		{1023, "0zz"},
 		{1024, "100"},
+		{32767, "zzz"},
+		{32768, "1000"}, // rolls to 4 digits ≈ year 2089
 	}
 	for _, c := range cases {
-		if got := encodeWeek(c.week); got != c.want {
-			t.Errorf("encodeWeek(%d) = %q, want %q", c.week, got, c.want)
+		if got := encodeDay(c.day); got != c.want {
+			t.Errorf("encodeDay(%d) = %q, want %q", c.day, got, c.want)
 		}
-		// Round-trip through decodeWeek.
-		if got := decodeWeek(c.want); got != c.week {
-			t.Errorf("decodeWeek(%q) = %d, want %d", c.want, got, c.week)
+		// Round-trip through decodeDay.
+		if got := decodeDay(c.want); got != c.day {
+			t.Errorf("decodeDay(%q) = %d, want %d", c.want, got, c.day)
 		}
 	}
 }
 
-func TestWeekOfWeekStart(t *testing.T) {
-	epoch := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+func TestDayOfDayStart(t *testing.T) {
+	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	if got := weekOf(epoch); got != 0 {
-		t.Errorf("weekOf(epoch) = %d, want 0", got)
+	if got := dayOf(epoch); got != 0 {
+		t.Errorf("dayOf(epoch) = %d, want 0", got)
 	}
-	if got := weekOf(epoch.Add(6*24*time.Hour + 23*time.Hour)); got != 0 {
-		t.Errorf("weekOf(epoch+6d23h) = %d, want 0", got)
+	if got := dayOf(epoch.Add(23 * time.Hour)); got != 0 {
+		t.Errorf("dayOf(epoch+23h) = %d, want 0", got)
 	}
-	if got := weekOf(epoch.Add(7 * 24 * time.Hour)); got != 1 {
-		t.Errorf("weekOf(epoch+7d) = %d, want 1", got)
+	if got := dayOf(epoch.Add(24 * time.Hour)); got != 1 {
+		t.Errorf("dayOf(epoch+24h) = %d, want 1", got)
 	}
 
-	// weekStart(weekOf(t)) is <= t and within 7 days.
+	// dayStart(dayOf(t)) is <= t and within 24 hours.
 	samples := []time.Time{
 		epoch,
-		epoch.Add(3*24*time.Hour + 5*time.Hour),
-		epoch.Add(400 * 24 * time.Hour),
+		epoch.Add(5 * time.Hour),
+		epoch.Add(4000 * 24 * time.Hour),
 		time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
 	}
 	for _, ts := range samples {
-		start := weekStart(weekOf(ts))
+		start := dayStart(dayOf(ts))
 		if start.After(ts) {
-			t.Errorf("weekStart(weekOf(%v)) = %v is after t", ts, start)
+			t.Errorf("dayStart(dayOf(%v)) = %v is after t", ts, start)
 		}
-		if ts.Sub(start) >= 7*24*time.Hour {
-			t.Errorf("weekStart(weekOf(%v)) = %v not within 7 days", ts, start)
+		if ts.Sub(start) >= 24*time.Hour {
+			t.Errorf("dayStart(dayOf(%v)) = %v not within 24h", ts, start)
 		}
 	}
 }
 
-func TestMonthDirUsesWeekStart(t *testing.T) {
-	// Week 4 starts 2020-01-29 and spills into February; the dir must be the
-	// START month, 2020-01.
-	id := FileID{Week: 4, Nonce: "p9m2rr"}
-	start := weekStart(4)
-	if start.Format("2006-01-02") != "2020-01-29" {
-		t.Fatalf("precondition: weekStart(4) = %v, want 2020-01-29", start)
+func TestMonthDir(t *testing.T) {
+	// A day never spans two months, so the dir is always the upload date's
+	// month — even on the last day of a month (here the 2024 leap day).
+	leapDay := time.Date(2024, 2, 29, 18, 0, 0, 0, time.UTC)
+	id := FileID{Day: dayOf(leapDay), Nonce: "p9m2rr"}
+	if got := id.MonthDir(); got != "2024-02" {
+		t.Errorf("MonthDir() = %q, want %q", got, "2024-02")
 	}
-	if got := id.MonthDir(); got != "2020-01" {
-		t.Errorf("MonthDir() = %q, want %q", got, "2020-01")
-	}
-	if !id.UploadedAt().Equal(start) {
-		t.Errorf("UploadedAt() = %v, want %v", id.UploadedAt(), start)
+	if got := id.UploadedAt(); got.Format("2006-01-02") != "2024-02-29" {
+		t.Errorf("UploadedAt() = %v, want 2024-02-29", got)
 	}
 }
 
 func TestStringParseRoundTrip(t *testing.T) {
 	cases := []FileID{
-		{Week: 339, Nonce: "p9m2rr", Slug: "my-notes", Ext: "txt"},
-		{Week: 339, Nonce: "x7f3q2", Ext: "png"},
-		{Week: 339, Nonce: "x7f3q2"},
-		{Week: 0, Nonce: "000000", Slug: "hello"},
-		{Week: 1024, Nonce: "zzzzzz", Slug: "a", Ext: "gz"},
+		{Day: 9679, Nonce: "p9m2rr", Slug: "my-notes", Ext: "txt"},
+		{Day: 9679, Nonce: "x7f3q2", Ext: "png"},
+		{Day: 9679, Nonce: "x7f3q2"},
+		{Day: 0, Nonce: "000000", Slug: "hello"},
+		{Day: 32768, Nonce: "zzzzzz", Slug: "a", Ext: "gz"},
 	}
 	for _, want := range cases {
 		s := want.String()
@@ -182,6 +181,11 @@ func TestNewID(t *testing.T) {
 	}
 	if len(id.Nonce) != 6 {
 		t.Errorf("NewID nonce = %q, want length 6", id.Nonce)
+	}
+
+	// The day segment is zero-padded to a consistent width of >= 3 chars.
+	if daySeg, _, _ := strings.Cut(id.String(), "-"); len(daySeg) < 3 {
+		t.Errorf("day segment %q shorter than 3 chars", daySeg)
 	}
 
 	// Parseable round-trip.

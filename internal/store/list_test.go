@@ -5,19 +5,19 @@ import (
 	"time"
 )
 
-// uploadNamed creates a completed named file in week (weeks since 2020-01-01).
-func uploadNamed(t *testing.T, s *Store, week int, nonce, slug string) FileID {
+// uploadNamed creates a completed named file for day (days since 2000-01-01).
+func uploadNamed(t *testing.T, s *Store, day int, nonce, slug string) FileID {
 	t.Helper()
-	id := FileID{Week: week, Nonce: nonce, Slug: slug, Ext: "txt"}
+	id := FileID{Day: day, Nonce: nonce, Slug: slug, Ext: "txt"}
 	return mustUpload(t, s, id, time.Time{})
 }
 
 func TestListNewestFirstAcrossMonths(t *testing.T) {
 	s := newTestStore(t)
-	// Weeks 0 (2020-01) and 9 (2020-03) land in different month dirs.
+	// Days 0 (2000-01) and 40 (2000-02) land in different month dirs.
 	old := uploadNamed(t, s, 0, "aaaaaa", "old-file")
-	newer := uploadNamed(t, s, 9, "bbbbbb", "new-file")
-	mustUpload(t, s, FileID{Week: 9, Nonce: "cccccc", Ext: "txt"}, time.Time{}) // unnamed: hidden
+	newer := uploadNamed(t, s, 40, "bbbbbb", "new-file")
+	mustUpload(t, s, FileID{Day: 40, Nonce: "cccccc", Ext: "txt"}, time.Time{}) // unnamed: hidden
 
 	entries, next, err := s.List("", 10)
 	if err != nil {
@@ -40,12 +40,12 @@ func TestListNewestFirstAcrossMonths(t *testing.T) {
 func TestListPaginationAcrossMonthBoundary(t *testing.T) {
 	s := newTestStore(t)
 	var want []string
-	// Newest first: week 9 entries sort before week 0 entries.
+	// Newest first: day 40 entries sort before day 0 entries.
 	for _, f := range []struct {
-		week  int
+		day   int
 		nonce string
-	}{{9, "zzzzzz"}, {9, "mmmmmm"}, {9, "aaaaaa"}, {0, "zzzzzz"}, {0, "aaaaaa"}} {
-		id := uploadNamed(t, s, f.week, f.nonce, "file")
+	}{{40, "zzzzzz"}, {40, "mmmmmm"}, {40, "aaaaaa"}, {0, "zzzzzz"}, {0, "aaaaaa"}} {
+		id := uploadNamed(t, s, f.day, f.nonce, "file")
 		want = append(want, id.String())
 	}
 
@@ -84,7 +84,7 @@ func TestListPaginationAcrossMonthBoundary(t *testing.T) {
 
 func TestListSkipsInProgressUploads(t *testing.T) {
 	s := newTestStore(t)
-	id, err := s.BeginUpload(FileID{Week: 9, Nonce: "pppppp", Slug: "half-done", Ext: "txt"}, time.Time{})
+	id, err := s.BeginUpload(FileID{Day: 40, Nonce: "pppppp", Slug: "half-done", Ext: "txt"}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

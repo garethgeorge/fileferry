@@ -43,13 +43,14 @@ unguessable. Have your reverse proxy set `X-Forwarded-Proto` and `X-Forwarded-Ho
 
 ## Storage Layout
 
-Files are stored on disk in a simple directory structure, no database is used. Each file has a unique ID, which is a base32-encoded string of the form `<week base32>-<nonce>[-<description>]`. The week is encoded as the number of weeks since the Unix epoch (1970-01-01), and the nonce is a random 5-byte value. The optional description is a user-provided string that can be used as a human readable identifier for the file.
+Files are stored on disk in a simple directory structure, no database is used. Each file has a unique ID of the form `<day>-<nonce>[-<description>][.<ext>]`. The day is the number of days since 2000-01-01, base32-encoded and zero-padded to 3 digits (so IDs sort chronologically and keep a consistent width through ~2089), and the nonce is 6 random base32 characters. The optional description is a user-provided, human-readable slug. Because the day is derivable from the ID, a file's month directory is too — no lookup table needed.
 
 ```
 data/
-├── 2026-07/                      # year-month of the upload week
-│   ├── ap-p9m2rr-my-notes.txt    # <week base32>-<nonce>[-<description>].<ext>
-│   └── ap-k2v9mm-big.iso.tmp     # upload in progress (renamed when complete)
+├── 2026-07/                      # year-month of the upload day
+│   └── 9ef-p9m2rr-my-notes.txt   # <day>-<nonce>[-<description>].<ext>
+├── inprogress/                   # uploads still streaming; renamed into the
+│   └── 9ef-k2v9mm-big.iso        # month dir on completion, wiped on startup
 └── expirations/
     └── 2027-07-02                # file IDs expiring on this date, one per line
 ```

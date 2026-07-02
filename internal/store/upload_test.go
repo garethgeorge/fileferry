@@ -23,7 +23,7 @@ func newTestStore(t *testing.T) *Store {
 }
 
 func testID(nonce string) FileID {
-	return FileID{Week: 339, Nonce: nonce, Slug: "test-file", Ext: "txt"}
+	return FileID{Day: 339, Nonce: nonce, Slug: "test-file", Ext: "txt"}
 }
 
 func TestUploadCommitAndRead(t *testing.T) {

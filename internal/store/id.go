@@ -11,18 +11,20 @@ import (
 // idAlphabet is lowercase Crockford base32 (no i, l, o, u).
 const idAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 
-// idEpoch is the reference instant for week numbering.
-var idEpoch = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+// idEpoch is the reference instant for day numbering. It predates any real
+// upload so day numbers are already 3 base32 digits wide, keeping the encoded
+// width consistent (2 digits = 1024 days ≈ 2002; 3 digits carry through ~2089).
+var idEpoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
-const weekDuration = 7 * 24 * time.Hour
+const dayDuration = 24 * time.Hour
 
 // ErrInvalidID is wrapped by ParseID on any malformed input.
 var ErrInvalidID = errors.New("invalid file id")
 
 // FileID identifies a stored file. Its string form is
-// "<week>-<nonce>[-<slug>][.<ext>]".
+// "<day>-<nonce>[-<slug>][.<ext>]".
 type FileID struct {
-	Week  int
+	Day   int
 	Nonce string
 	Slug  string
 	Ext   string
@@ -32,7 +34,7 @@ type FileID struct {
 // filename. The slug is sanitized and the extension is derived from filename.
 func NewID(now time.Time, slug, filename string) FileID {
 	return FileID{
-		Week:  weekOf(now),
+		Day:   dayOf(now),
 		Nonce: newNonce(),
 		Slug:  sanitizeSlug(slug),
 		Ext:   sanitizeExt(filename),
@@ -42,7 +44,7 @@ func NewID(now time.Time, slug, filename string) FileID {
 // String renders the FileID as its canonical filename form.
 func (id FileID) String() string {
 	var b strings.Builder
-	b.WriteString(encodeWeek(id.Week))
+	b.WriteString(encodeDay(id.Day))
 	b.WriteByte('-')
 	b.WriteString(id.Nonce)
 	if id.Slug != "" {
@@ -56,14 +58,16 @@ func (id FileID) String() string {
 	return b.String()
 }
 
-// MonthDir returns the "2006-01" directory for the week this ID belongs to.
+// MonthDir returns the "2006-01" directory for the day this ID belongs to. A
+// day never spans two calendar months, so this always matches the upload date's
+// month.
 func (id FileID) MonthDir() string {
-	return weekStart(id.Week).Format("2006-01")
+	return dayStart(id.Day).Format("2006-01")
 }
 
-// UploadedAt returns the start instant of this ID's week.
+// UploadedAt returns the start instant (UTC midnight) of this ID's day.
 func (id FileID) UploadedAt() time.Time {
-	return weekStart(id.Week)
+	return dayStart(id.Day)
 }
 
 // ParseID parses a filename into a FileID. All failures wrap ErrInvalidID.
@@ -89,12 +93,12 @@ func ParseID(s string) (FileID, error) {
 		return FileID{}, ErrInvalidID
 	}
 
-	// Week.
-	weekStr := parts[0]
-	if len(weekStr) < 1 || !allInAlphabet(weekStr) {
+	// Day.
+	dayStr := parts[0]
+	if len(dayStr) < 1 || !allInAlphabet(dayStr) {
 		return FileID{}, ErrInvalidID
 	}
-	week := decodeWeek(weekStr)
+	day := decodeDay(dayStr)
 
 	// Nonce: exactly 6 alphabet chars.
 	nonce := parts[1]
@@ -111,7 +115,7 @@ func ParseID(s string) (FileID, error) {
 		}
 	}
 
-	return FileID{Week: week, Nonce: nonce, Slug: slug, Ext: ext}, nil
+	return FileID{Day: day, Nonce: nonce, Slug: slug, Ext: ext}, nil
 }
 
 // newNonce returns a fresh 6-character nonce drawn from idAlphabet.
@@ -128,43 +132,43 @@ func newNonce() string {
 	return string(out)
 }
 
-// weekOf returns the number of whole weeks between idEpoch and t.
-func weekOf(t time.Time) int {
-	return int(t.Sub(idEpoch) / weekDuration)
+// dayOf returns the number of whole days between idEpoch and t.
+func dayOf(t time.Time) int {
+	return int(t.Sub(idEpoch) / dayDuration)
 }
 
-// weekStart returns the instant at which the given week begins.
-func weekStart(week int) time.Time {
-	return idEpoch.Add(time.Duration(week) * weekDuration)
+// dayStart returns the instant (UTC midnight) at which the given day begins.
+func dayStart(day int) time.Time {
+	return idEpoch.Add(time.Duration(day) * dayDuration)
 }
 
-// encodeWeek base32-encodes week (MSB first), zero-padded to width >= 2.
-func encodeWeek(week int) string {
-	if week <= 0 {
-		return "00"
+// encodeDay base32-encodes day (MSB first), zero-padded to width >= 3.
+func encodeDay(day int) string {
+	if day <= 0 {
+		return "000"
 	}
 	var digits []byte
-	for week > 0 {
-		digits = append(digits, idAlphabet[week%len(idAlphabet)])
-		week /= len(idAlphabet)
+	for day > 0 {
+		digits = append(digits, idAlphabet[day%len(idAlphabet)])
+		day /= len(idAlphabet)
 	}
 	// Reverse in place (digits are least-significant first).
 	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
 		digits[i], digits[j] = digits[j], digits[i]
 	}
-	if len(digits) < 2 {
+	for len(digits) < 3 {
 		digits = append([]byte{'0'}, digits...)
 	}
 	return string(digits)
 }
 
-// decodeWeek decodes a base32 week string. Caller must ensure allInAlphabet.
-func decodeWeek(s string) int {
-	week := 0
+// decodeDay decodes a base32 day string. Caller must ensure allInAlphabet.
+func decodeDay(s string) int {
+	day := 0
 	for i := 0; i < len(s); i++ {
-		week = week*len(idAlphabet) + strings.IndexByte(idAlphabet, s[i])
+		day = day*len(idAlphabet) + strings.IndexByte(idAlphabet, s[i])
 	}
-	return week
+	return day
 }
 
 // sanitizeSlug lowercases input, collapses non-[a-z0-9] runs to single "-",
