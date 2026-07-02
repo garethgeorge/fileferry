@@ -71,6 +71,186 @@ func putBytes(t *testing.T, ts *httptest.Server, id string, content []byte) *htt
 	return resp
 }
 
+func createEncryptedUpload(t *testing.T, ts *httptest.Server, filename string) createResponse {
+	t.Helper()
+	body := fmt.Sprintf(`{"filename":%q,"encrypt":true}`, filename)
+	resp, err := http.Post(ts.URL+"/upload/api/create", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create: status %d", resp.StatusCode)
+	}
+	var cr createResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(cr.ID, ".encr") {
+		t.Fatalf("encrypted id %q does not end in .encr", cr.ID)
+	}
+	return cr
+}
+
+func putEncrypted(t *testing.T, ts *httptest.Server, id, key, filename string, content []byte) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/upload/api/put/"+id, bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Encryption-Key", key)
+	req.Header.Set("X-Filename", filename)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp
+}
+
+// getWithKey fetches a file supplying the decryption key via the header.
+func getWithKey(t *testing.T, url, key string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "" {
+		req.Header.Set("X-Encryption-Key", key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestEncryptedRoundtrip(t *testing.T) {
+	ts, dataDir := newTestServer(t)
+	const key = "correct horse battery staple"
+	content := bytes.Repeat([]byte("top secret payload\n"), 5000) // spans chunks
+	cr := createEncryptedUpload(t, ts, "diagram.png")
+	if resp := putEncrypted(t, ts, cr.ID, key, "diagram.png", content); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("encrypted put: status %d", resp.StatusCode)
+	}
+
+	// The bytes on disk must be ciphertext, never the plaintext.
+	stored := readStored(t, dataDir, cr.ID)
+	if bytes.Contains(stored, []byte("top secret payload")) {
+		t.Fatal("plaintext found in stored file")
+	}
+	if bytes.Contains(stored, []byte("diagram.png")) {
+		t.Fatal("original filename leaked into stored file")
+	}
+
+	// Correct key decrypts, restores the content type from the hidden filename.
+	resp := getWithKey(t, ts.URL+"/"+cr.ID, key)
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decrypt get: status %d", resp.StatusCode)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("decrypted %d bytes, want %d", len(got), len(content))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/png") {
+		t.Fatalf("Content-Type = %q, want image/png (recovered from hidden filename)", ct)
+	}
+}
+
+func TestEncryptedWrongKeyRefused(t *testing.T) {
+	ts, _ := newTestServer(t)
+	cr := createEncryptedUpload(t, ts, "notes.txt")
+	putEncrypted(t, ts, cr.ID, "right-key", "notes.txt", []byte("secret"))
+
+	resp := getWithKey(t, ts.URL+"/"+cr.ID, "wrong-key")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong key: status %d, want 403", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Wrong key") {
+		t.Fatalf("wrong key body = %q, want \"Wrong key\"", body)
+	}
+}
+
+// A browser hit (no key header) gets the decryptor shell, not the ciphertext.
+func TestEncryptedNoKeyServesShell(t *testing.T) {
+	ts, _ := newTestServer(t)
+	cr := createEncryptedUpload(t, ts, "notes.txt")
+	putEncrypted(t, ts, cr.ID, "k", "notes.txt", []byte("secret"))
+
+	resp, err := http.Get(ts.URL + "/" + cr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("no-key get: status %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("no-key Content-Type = %q, want text/html shell", ct)
+	}
+	if bytes.Contains(body, []byte("secret")) {
+		t.Fatal("shell response leaked ciphertext/plaintext")
+	}
+	if !bytes.Contains(body, []byte("ffkey")) {
+		t.Fatal("shell page does not look like the decryptor bootstrap")
+	}
+}
+
+// With the key in a cookie (as the bootstrap sets it), a browser navigation
+// renders the normal preview pipeline rather than a bespoke viewer.
+func TestEncryptedCookieRendersPreview(t *testing.T) {
+	ts, _ := newTestServer(t)
+	const key = "cookie-key"
+	cr := createEncryptedUpload(t, ts, "notes.txt")
+	putEncrypted(t, ts, cr.ID, key, "notes.txt", []byte("hello preview"))
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+cr.ID, nil)
+	req.AddCookie(&http.Cookie{Name: "ffkey", Value: key})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cookie get: status %d", resp.StatusCode)
+	}
+	// The text previewer renders an HTML page containing the decrypted content.
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("cookie get Content-Type = %q, want text/html preview", ct)
+	}
+	if !bytes.Contains(page, []byte("hello preview")) {
+		t.Fatal("preview page does not contain the decrypted content")
+	}
+}
+
+func TestEncryptedPutRequiresKey(t *testing.T) {
+	ts, _ := newTestServer(t)
+	cr := createEncryptedUpload(t, ts, "notes.txt")
+	// PUT without the key header must be rejected.
+	if resp := putBytes(t, ts, cr.ID, []byte("data")); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("keyless encrypted put: status %d, want 400", resp.StatusCode)
+	}
+}
+
+// readStored returns the raw on-disk bytes for a completed upload.
+func readStored(t *testing.T, dataDir, id string) []byte {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dataDir, "*", id))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("locate stored file %s: matches=%v err=%v", id, matches, err)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestUploadDownloadRoundtrip(t *testing.T) {
 	ts, _ := newTestServer(t)
 	cr := createUpload(t, ts, "notes.txt", "", 365)
@@ -297,6 +477,42 @@ func TestDeleteEndpoint(t *testing.T) {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Fatalf("double delete: status %d, want 404", resp2.StatusCode)
+	}
+}
+
+func TestRawSandboxByType(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	cases := []struct {
+		filename    string
+		wantSandbox bool
+	}{
+		{"notes.txt", true},   // inert but kept sandboxed (nosniff is the guard)
+		{"page.html", true},   // active document: must stay sandboxed
+		{"drawing.svg", true}, // SVG can script: must stay sandboxed
+		{"doc.pdf", false},    // native viewer needs no sandbox
+		{"photo.png", false},  // inert image
+		{"clip.mp4", false},   // inert media
+	}
+	for _, tc := range cases {
+		cr := createUpload(t, ts, tc.filename, "", 365)
+		putBytes(t, ts, cr.ID, []byte("data"))
+
+		resp, err := http.Get(ts.URL + "/" + cr.ID + "?raw=1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: nosniff missing, got %q", tc.filename, got)
+		}
+		csp := resp.Header.Get("Content-Security-Policy")
+		if tc.wantSandbox && csp != "sandbox" {
+			t.Errorf("%s: CSP = %q, want sandbox", tc.filename, csp)
+		}
+		if !tc.wantSandbox && csp != "" {
+			t.Errorf("%s: CSP = %q, want none", tc.filename, csp)
+		}
 	}
 }
 

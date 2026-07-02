@@ -1,7 +1,10 @@
 package preview
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -183,11 +186,134 @@ func TestMarkdownServeHTTP(t *testing.T) {
 	}
 }
 
+func TestArchiveMatches(t *testing.T) {
+	p := NewArchive()
+
+	cases := []struct {
+		name string
+		f    File
+		want bool
+	}{
+		{"zip", File{Ext: "zip", Size: 1000}, true},
+		{"tar", File{Ext: "tar", Size: 1000}, true},
+		{"tgz", File{Ext: "tgz", Size: 1000}, true},
+		{"gz", File{Ext: "gz", Size: 1000}, true},
+		{"too large", File{Ext: "zip", Size: maxArchivePreviewSize + 1}, false},
+		{"empty", File{Ext: "zip", Size: 0}, false},
+		{"other", File{Ext: "png", Size: 1000}, false},
+	}
+	for _, tc := range cases {
+		if got := p.Matches(tc.f); got != tc.want {
+			t.Errorf("%s: Matches = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestArchiveServeZip(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w1, _ := zw.Create("dir/hello.txt")
+	w1.Write([]byte("hello world"))
+	zw.Create("dir/") // a directory entry
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	body := serveArchive(t, "ap-abc123.zip", "zip", buf.Bytes())
+	if !strings.Contains(body, "zip archive") {
+		t.Errorf("missing archive kind:\n%s", body)
+	}
+	if !strings.Contains(body, "dir/hello.txt") {
+		t.Errorf("missing file entry:\n%s", body)
+	}
+	// Directory entries render with a single trailing slash, not a doubled one.
+	if strings.Contains(body, "dir//") {
+		t.Errorf("directory entry has a doubled trailing slash:\n%s", body)
+	}
+	if !strings.Contains(body, ">dir/<") {
+		t.Errorf("directory entry missing single trailing slash:\n%s", body)
+	}
+}
+
+func TestArchiveServeTarGz(t *testing.T) {
+	var raw bytes.Buffer
+	tw := tar.NewWriter(&raw)
+	content := []byte("some file contents")
+	tw.WriteHeader(&tar.Header{Name: "notes.md", Mode: 0o644, Size: int64(len(content))})
+	tw.Write(content)
+	tw.Close()
+
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	gz.Write(raw.Bytes())
+	gz.Close()
+
+	body := serveArchive(t, "ap-abc123.gz", "gz", gzBuf.Bytes())
+	if !strings.Contains(body, "tar.gz archive") {
+		t.Errorf("missing archive kind:\n%s", body)
+	}
+	if !strings.Contains(body, "notes.md") {
+		t.Errorf("missing tar entry:\n%s", body)
+	}
+}
+
+func TestArchiveGzFallbackNotTar(t *testing.T) {
+	// A plain gzip stream (not a tar) should be served raw, not as a listing.
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	gz.Write([]byte("just some gzipped text, not a tarball"))
+	gz.Close()
+
+	p := NewArchive()
+	f := File{
+		ID:       "ap-abc123.gz",
+		Ext:      "gz",
+		MimeType: "application/gzip",
+		Size:     int64(gzBuf.Len()),
+		Open:     func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(gzBuf.Bytes())), nil },
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/"+f.ID, nil)
+	if err := p.ServeHTTP(rec, req, f); err != nil {
+		t.Fatalf("ServeHTTP error: %v", err)
+	}
+	res := rec.Result()
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/gzip") {
+		t.Errorf("fallback Content-Type = %q, want application/gzip", ct)
+	}
+	if strings.Contains(rec.Body.String(), "<table") {
+		t.Errorf("plain gzip should not render an archive listing")
+	}
+}
+
+// serveArchive runs the archive previewer over data and returns the body.
+func serveArchive(t *testing.T, id, ext string, data []byte) string {
+	t.Helper()
+	p := NewArchive()
+	f := File{
+		ID:       id,
+		Ext:      ext,
+		MimeType: "application/octet-stream",
+		Size:     int64(len(data)),
+		Open:     func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil },
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/"+id, nil)
+	if err := p.ServeHTTP(rec, req, f); err != nil {
+		t.Fatalf("ServeHTTP error: %v", err)
+	}
+	if ct := rec.Result().Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	return rec.Body.String()
+}
+
 func TestRegistryFind(t *testing.T) {
 	md := NewMarkdown()
 	txt := NewText()
 	med := NewMedia()
-	reg := NewRegistry(md, txt, med)
+	arc := NewArchive()
+	reg := NewRegistry(md, txt, med, arc)
 
 	nonMatch := File{Ext: "bin", MimeType: "application/octet-stream", Size: 10}
 	if got := reg.Find(nonMatch); got != nil {
@@ -202,5 +328,10 @@ func TestRegistryFind(t *testing.T) {
 	video := File{Ext: "mp4", MimeType: "video/mp4"}
 	if got := reg.Find(video); got != med {
 		t.Errorf("Find(video) = %v, want media previewer", got)
+	}
+
+	zipFile := File{Ext: "zip", MimeType: "application/zip", Size: 1000}
+	if got := reg.Find(zipFile); got != arc {
+		t.Errorf("Find(zip) = %v, want archive previewer", got)
 	}
 }

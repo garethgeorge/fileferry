@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.ID}}</title>
+<style>
+  :root { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: #1f2328; background: #fff; font-size: 13px; }
+  .fs-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid #d1d9e0;
+    background: #f6f8fa;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+  .fs-header .fs-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .fs-actions { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+  .fs-total { color: #59636e; font-size: 14px; }
+  .fs-dl {
+    display: inline-block;
+    padding: 8px 18px;
+    border-radius: 6px;
+    background: #1f883d;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .fs-dl:hover { background: #1a7f37; }
+  .fs-meta { margin-top: 20px; padding: 10px 12px; color: #59636e; border-bottom: 1px solid #eaeef2; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { padding: 5px 12px; text-align: left; border-bottom: 1px solid #eaeef2; }
+  th { color: #59636e; font-weight: 600; }
+  .fs-size { text-align: right; white-space: nowrap; color: #59636e; }
+  .fs-dir { color: #0969da; }
+  .fs-note { padding: 10px 12px; color: #9a6700; }
+</style>
+</head>
+<body>
+<div class="fs-header">
+  <span class="fs-name">{{.ID}}</span>
+  <span class="fs-actions">
+    <span class="fs-total">{{.TotalSize}}</span>
+    <a class="fs-dl" href="/{{.ID}}?dl=1">Download</a>
+  </span>
+</div>
+<div class="fs-meta">{{.Kind}} archive · {{.Count}} {{if .Truncated}}+ {{end}}entries</div>
+<table>
+  <thead><tr><th>Name</th><th class="fs-size">Size</th></tr></thead>
+  <tbody>
+  {{range .Entries}}
+    <tr>
+      <td class="{{if .IsDir}}fs-dir{{end}}">{{.Name}}{{if .IsDir}}/{{end}}</td>
+      <td class="fs-size">{{if .IsDir}}—{{else}}{{.SizeStr}}{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{if .Truncated}}<p class="fs-note">Listing truncated — this archive has more entries than shown.</p>{{end}}
+</body>
+</html>

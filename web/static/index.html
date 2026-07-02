@@ -54,12 +54,7 @@
         <label for="description" class="mb-1 block text-xs font-medium text-slate-500">URL suffix (optional)</label>
         <input id="description" type="text" placeholder="my-notes" maxlength="40"
           class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 focus:outline-none" />
-        <p class="mt-1 text-xs text-slate-400">Appended to the file URL, e.g. <span class="font-mono">/9ef-p9m2rr-my-notes.txt</span>. Add an extension (<span class="font-mono">my-notes.md</span>) to relabel text content.</p>
-      </div>
-      <div>
-        <label for="paste-ext" class="mb-1 block text-xs font-medium text-slate-500">Paste ext</label>
-        <input id="paste-ext" type="text" value="txt" style="width: 5ch"
-          class="rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm shadow-sm focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 focus:outline-none" />
+        <p class="mt-1 text-xs text-slate-400">Appended to the file URL, e.g. <span class="font-mono">/9ef-p9m2rr-my-notes.txt</span>. A trailing extension (<span class="font-mono">my-notes.md</span>) replaces the real file extension for text content.</p>
       </div>
       <div>
         <label for="expires" class="mb-1 block text-xs font-medium text-slate-500">Expires</label>
@@ -67,12 +62,68 @@
           class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 focus:outline-none">
           <option value="1">1 day</option>
           <option value="7">1 week</option>
-          <option value="30">1 month</option>
-          <option value="365" selected>1 year</option>
+          <option value="30" selected>1 month</option>
+          <option value="365">1 year</option>
           <option value="0">never</option>
         </select>
       </div>
+      <div>
+        <label class="mb-1 block text-xs font-medium text-slate-500">Encrypt</label>
+        <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm">
+          <input id="encrypt-toggle" type="checkbox" class="h-4 w-4 accent-indigo-600" />
+          <span class="text-slate-600">AES-256</span>
+        </label>
+      </div>
+
+      <!-- Encryption note (shown when Encrypt is on) -->
+      <div id="encrypt-note" class="hidden w-full">
+        <p class="text-xs text-slate-400">A fresh AES-256 key is generated for each file and passed to the server to encrypt — never stored on it. The key rides in the share link's <span class="font-mono">#fragment</span>, so it stays out of server logs. Keys are also saved in <span class="font-medium">this browser's local storage</span> (cleared after 48h) so your file list can rebuild working links; lose the link and this browser, and the file can't be decrypted.</p>
+      </div>
     </div>
+
+    <!-- Terminal usage (collapsible) -->
+    <section class="mt-4">
+      <details class="group overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-3.5 text-sm font-medium text-slate-700 select-none [&::-webkit-details-marker]:hidden">
+          <span class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4 text-slate-400">
+              <path stroke-linecap="round" stroke-linejoin="round" d="m6.75 7.5 3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
+            </svg>
+            Upload from the terminal
+          </span>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-4 w-4 text-slate-400 transition-transform duration-200 group-open:rotate-180">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+          </svg>
+        </summary>
+        <div class="space-y-5 border-t border-slate-100 px-5 py-5">
+          <p class="text-xs text-slate-500">Uploading is a two-step API — create a slot, then <span class="font-mono">PUT</span> the bytes. These snippets need <span class="font-mono">jq</span>. If your instance is behind reverse-proxy auth, add your credentials (e.g. <span class="font-mono">curl -u user:pass</span>).</p>
+
+          <div>
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">curl · upload a file</span>
+              <button type="button" class="cmd-copy shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50" data-target="cmd-curl">Copy</button>
+            </div>
+            <pre id="cmd-curl" class="overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 text-xs leading-relaxed text-slate-100"><code></code></pre>
+          </div>
+
+          <div>
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">curl · share text from stdin</span>
+              <button type="button" class="cmd-copy shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50" data-target="cmd-stdin">Copy</button>
+            </div>
+            <pre id="cmd-stdin" class="overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 text-xs leading-relaxed text-slate-100"><code></code></pre>
+          </div>
+
+          <div>
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">wget · upload a file</span>
+              <button type="button" class="cmd-copy shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50" data-target="cmd-wget">Copy</button>
+            </div>
+            <pre id="cmd-wget" class="overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 text-xs leading-relaxed text-slate-100"><code></code></pre>
+          </div>
+        </div>
+      </details>
+    </section>
 
     <!-- Uploads -->
     <section id="uploads-section" class="mt-8 hidden">

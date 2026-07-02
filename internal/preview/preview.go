@@ -120,6 +120,12 @@ var mimeOverrides = map[string]string{
 
 	// documents
 	"pdf": "application/pdf",
+
+	// archives
+	"zip": "application/zip",
+	"tar": "application/x-tar",
+	"gz":  "application/gzip",
+	"tgz": "application/gzip",
 }
 
 // MimeTypeForExt returns the content type for an extension (no dot):
