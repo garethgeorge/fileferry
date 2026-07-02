@@ -90,16 +90,31 @@ var mimeOverrides = map[string]string{
 
 	// images
 	"png":  "image/png",
+	"apng": "image/apng",
 	"jpg":  "image/jpeg",
 	"jpeg": "image/jpeg",
+	"jfif": "image/jpeg",
 	"gif":  "image/gif",
 	"webp": "image/webp",
+	"avif": "image/avif",
+	"bmp":  "image/bmp",
+	"ico":  "image/x-icon",
 
-	// audio / video
+	// video
 	"mp4":  "video/mp4",
+	"m4v":  "video/mp4",
+	"mov":  "video/quicktime",
 	"webm": "video/webm",
+	"ogv":  "video/ogg",
+
+	// audio
 	"mp3":  "audio/mpeg",
+	"m4a":  "audio/mp4",
+	"aac":  "audio/aac",
 	"ogg":  "audio/ogg",
+	"oga":  "audio/ogg",
+	"opus": "audio/ogg",
+	"weba": "audio/webm",
 	"wav":  "audio/wav",
 	"flac": "audio/flac",
 

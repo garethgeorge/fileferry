@@ -323,11 +323,23 @@ func TestListEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Entries) != 1 {
-		t.Fatalf("got %d entries, want 1 (only named files)", len(out.Entries))
+	if len(out.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2 (named and unnamed)", len(out.Entries))
 	}
-	if out.Entries[0].ID != named.ID || out.Entries[0].Slug != "my-notes" || out.Entries[0].Size != 3 {
-		t.Fatalf("bad entry: %+v", out.Entries[0])
+	// Nonces are random, so locate each entry by ID rather than assuming order.
+	byID := map[string]struct {
+		ID   string `json:"id"`
+		Slug string `json:"slug"`
+		Size int64  `json:"size"`
+	}{}
+	for _, e := range out.Entries {
+		byID[e.ID] = e
+	}
+	if e := byID[named.ID]; e.Slug != "my-notes" || e.Size != 3 {
+		t.Fatalf("bad named entry: %+v", e)
+	}
+	if e, ok := byID[unnamed.ID]; !ok || e.Slug != "" || e.Size != 3 {
+		t.Fatalf("bad unnamed entry: %+v (present=%v)", e, ok)
 	}
 }
 

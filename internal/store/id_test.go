@@ -172,7 +172,7 @@ func TestSanitizeExt(t *testing.T) {
 
 func TestNewID(t *testing.T) {
 	now := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
-	id := NewID(now, "My Notes!", "notes.txt")
+	id := NewID(now, "My Notes!", "notes.txt", false)
 	if id.Slug != "my-notes" {
 		t.Errorf("NewID slug = %q, want %q", id.Slug, "my-notes")
 	}
@@ -198,8 +198,37 @@ func TestNewID(t *testing.T) {
 	}
 
 	// Two calls give different nonces.
-	other := NewID(now, "My Notes!", "notes.txt")
+	other := NewID(now, "My Notes!", "notes.txt", false)
 	if other.Nonce == id.Nonce {
 		t.Errorf("two NewID calls produced same nonce %q", id.Nonce)
+	}
+}
+
+func TestNewIDCustomExtension(t *testing.T) {
+	now := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+
+	// Text content: a custom extension in the suffix overrides the file's own.
+	id := NewID(now, "my-notes.md", "paste.txt", true)
+	if id.Slug != "my-notes" || id.Ext != "md" {
+		t.Errorf("text override: got slug=%q ext=%q, want my-notes/md", id.Slug, id.Ext)
+	}
+
+	// Text content, no custom extension: keep the file's own.
+	id = NewID(now, "my-notes", "paste.txt", true)
+	if id.Slug != "my-notes" || id.Ext != "txt" {
+		t.Errorf("text no-override: got slug=%q ext=%q, want my-notes/txt", id.Slug, id.Ext)
+	}
+
+	// Non-text content: the extension is not overridden and the dot is treated
+	// as an ordinary slug separator, preserving prior behavior.
+	id = NewID(now, "holiday.png", "photo.jpg", false)
+	if id.Slug != "holiday-png" || id.Ext != "jpg" {
+		t.Errorf("non-text: got slug=%q ext=%q, want holiday-png/jpg", id.Slug, id.Ext)
+	}
+
+	// Trailing token that is not a valid extension stays part of the slug.
+	id = NewID(now, "report.finalversionlong", "paste.txt", true)
+	if id.Slug != "report-finalversionlong" || id.Ext != "txt" {
+		t.Errorf("invalid ext: got slug=%q ext=%q, want report-finalversionlong/txt", id.Slug, id.Ext)
 	}
 }

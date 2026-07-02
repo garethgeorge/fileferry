@@ -17,7 +17,8 @@ func TestListNewestFirstAcrossMonths(t *testing.T) {
 	// Days 0 (2000-01) and 40 (2000-02) land in different month dirs.
 	old := uploadNamed(t, s, 0, "aaaaaa", "old-file")
 	newer := uploadNamed(t, s, 40, "bbbbbb", "new-file")
-	mustUpload(t, s, FileID{Day: 40, Nonce: "cccccc", Ext: "txt"}, time.Time{}) // unnamed: hidden
+	// Unnamed uploads are listed too. Within day 40, "cccccc" sorts newest.
+	unnamed := mustUpload(t, s, FileID{Day: 40, Nonce: "cccccc", Ext: "txt"}, time.Time{})
 
 	entries, next, err := s.List("", 10)
 	if err != nil {
@@ -26,14 +27,17 @@ func TestListNewestFirstAcrossMonths(t *testing.T) {
 	if next != "" {
 		t.Fatalf("unexpected nextCursor %q", next)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("got %d entries, want 2 (unnamed files must be hidden)", len(entries))
+	if len(entries) != 3 {
+		t.Fatalf("got %d entries, want 3 (all uploads, named and unnamed)", len(entries))
 	}
-	if entries[0].ID != newer.String() || entries[1].ID != old.String() {
-		t.Fatalf("wrong order: %s, %s", entries[0].ID, entries[1].ID)
+	if entries[0].ID != unnamed.String() || entries[1].ID != newer.String() || entries[2].ID != old.String() {
+		t.Fatalf("wrong order: %s, %s, %s", entries[0].ID, entries[1].ID, entries[2].ID)
 	}
-	if entries[0].Slug != "new-file" || entries[0].Ext != "txt" || entries[0].Size == 0 {
-		t.Fatalf("bad entry: %+v", entries[0])
+	if entries[0].Slug != "" || entries[0].Ext != "txt" || entries[0].Size == 0 {
+		t.Fatalf("bad unnamed entry: %+v", entries[0])
+	}
+	if entries[1].Slug != "new-file" {
+		t.Fatalf("bad named entry: %+v", entries[1])
 	}
 }
 

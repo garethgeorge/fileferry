@@ -1,14 +1,20 @@
+# Recipes run their tools through `nix develop` (see flake.nix), so the pinned
+# go / tailwindcss / goreleaser versions are used without entering the shell.
+
 build:
-    go build -o fileferry .
+    nix develop -c go build -o fileferry .
 
 test:
-    go test -race ./...
+    nix develop -c go test -race ./...
 
 vet:
-    go vet ./...
+    nix develop -c go vet ./...
+
+# Validate the goreleaser config.
+release-check:
+    nix develop -c goreleaser check
 
 # Regenerate the committed Tailwind stylesheet. Only needed when classes in
-# web/static change; requires the standalone tailwindcss CLI on PATH
-# (https://tailwindcss.com/blog/standalone-cli).
+# web/static change.
 css:
-    tailwindcss -i web/src/input.css -o web/static/tailwind.css --minify
+    nix develop -c tailwindcss -i web/src/input.css -o web/static/tailwind.css --minify

@@ -30,15 +30,38 @@ type FileID struct {
 	Ext   string
 }
 
-// NewID mints a fresh FileID for the given time, slug and originating
-// filename. The slug is sanitized and the extension is derived from filename.
-func NewID(now time.Time, slug, filename string) FileID {
+// NewID mints a fresh FileID for the given time, URL suffix and originating
+// filename. The extension is normally derived from filename, but for textual
+// content the suffix may carry a custom extension ("<slug>.<ext>") that
+// overrides it — so a pasted snippet can be relabeled ".md", ".json", etc.
+// while the slug keeps the remainder.
+func NewID(now time.Time, suffix, filename string, contentIsText bool) FileID {
+	slug := sanitizeSlug(suffix)
+	ext := sanitizeExt(filename)
+	if contentIsText {
+		if base, custom := splitSuffixExt(suffix); custom != "" {
+			slug, ext = base, custom
+		}
+	}
 	return FileID{
 		Day:   dayOf(now),
 		Nonce: newNonce(),
-		Slug:  sanitizeSlug(slug),
-		Ext:   sanitizeExt(filename),
+		Slug:  slug,
+		Ext:   ext,
 	}
+}
+
+// splitSuffixExt splits a user-supplied suffix into a sanitized slug and a
+// custom extension taken from a trailing ".<ext>". If the trailing token is
+// not a valid extension there is no custom extension and the whole suffix is
+// the slug.
+func splitSuffixExt(suffix string) (slug, ext string) {
+	if i := strings.LastIndexByte(suffix, '.'); i >= 0 {
+		if cand := strings.ToLower(suffix[i+1:]); isValidExt(cand) {
+			return sanitizeSlug(suffix[:i]), cand
+		}
+	}
+	return sanitizeSlug(suffix), ""
 }
 
 // String renders the FileID as its canonical filename form.

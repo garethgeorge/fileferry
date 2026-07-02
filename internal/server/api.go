@@ -6,9 +6,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/garethgeorge/fileferry/internal/preview"
 	"github.com/garethgeorge/fileferry/internal/store"
 )
 
@@ -46,7 +49,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		expiresAt = time.Now().UTC().AddDate(0, 0, days)
 	}
 
-	id, err := s.store.BeginUpload(store.NewID(time.Now(), req.Slug, req.Filename), expiresAt)
+	// A custom extension in the URL suffix only overrides the file's own
+	// extension for textual content, where relabeling is lossless.
+	fileExt := strings.TrimPrefix(filepath.Ext(req.Filename), ".")
+	contentIsText := strings.HasPrefix(preview.MimeTypeForExt(fileExt), "text/")
+
+	id, err := s.store.BeginUpload(store.NewID(time.Now(), req.Slug, req.Filename, contentIsText), expiresAt)
 	if err != nil {
 		log.Printf("create upload: %v", err)
 		http.Error(w, "could not create upload", http.StatusInternalServerError)

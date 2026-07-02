@@ -5,6 +5,9 @@ const descriptionInput = document.getElementById("description");
 const pasteExtInput = document.getElementById("paste-ext");
 const expiresSelect = document.getElementById("expires");
 const dropzone = document.getElementById("dropzone");
+const textInput = document.getElementById("text-input");
+const browseBtn = document.getElementById("browse-btn");
+const uploadTextBtn = document.getElementById("upload-text-btn");
 const fileInput = document.getElementById("file-input");
 const uploadsSection = document.getElementById("uploads-section");
 const uploadsList = document.getElementById("uploads-list");
@@ -13,6 +16,19 @@ const filesEmpty = document.getElementById("files-empty");
 const sentinel = document.getElementById("sentinel");
 
 // ---- Helpers --------------------------------------------------------------
+// sanitizeSuffix mirrors what the server does to the URL suffix: lowercase and
+// whitespace collapsed to dashes. The server does the final full sanitize.
+function sanitizeSuffix(s) {
+  return s.toLowerCase().replace(/\s+/g, "-");
+}
+
+// Live-sanitize the suffix field as the user types, preserving the caret.
+descriptionInput.addEventListener("input", () => {
+  const caret = sanitizeSuffix(descriptionInput.value.slice(0, descriptionInput.selectionStart)).length;
+  descriptionInput.value = sanitizeSuffix(descriptionInput.value);
+  descriptionInput.setSelectionRange(caret, caret);
+});
+
 function humanSize(bytes) {
   if (bytes < 1024) return bytes + " B";
   const units = ["KB", "MB", "GB", "TB"];
@@ -188,17 +204,13 @@ function renderFileRow(entry) {
   const row = document.createElement("div");
   row.className = "flex items-center gap-3 px-4 py-3";
 
+  // Link text is the full id incl. extension (e.g. 9ef-p9m2rr-my-notes.txt).
   const link = document.createElement("a");
   link.href = url;
   link.target = "_blank";
   link.rel = "noopener";
-  link.textContent = entry.slug || entry.id;
-  link.className = "flex-1 truncate text-sm font-medium text-indigo-600 hover:underline";
-
-  const badge = document.createElement("span");
-  badge.textContent = entry.ext || "?";
-  badge.className =
-    "shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium uppercase text-slate-500";
+  link.textContent = entry.id;
+  link.className = "flex-1 truncate font-mono text-sm font-medium text-indigo-600 hover:underline";
 
   const size = document.createElement("span");
   size.textContent = humanSize(entry.size || 0);
@@ -232,7 +244,6 @@ function renderFileRow(entry) {
   });
 
   row.appendChild(link);
-  row.appendChild(badge);
   row.appendChild(size);
   row.appendChild(date);
   row.appendChild(copyBtn);
@@ -241,11 +252,46 @@ function renderFileRow(entry) {
 }
 
 // ---- Input wiring ---------------------------------------------------------
-dropzone.addEventListener("click", () => fileInput.click());
+browseBtn.addEventListener("click", () => fileInput.click());
 
 fileInput.addEventListener("change", () => {
   for (const file of fileInput.files) uploadBlob(file, file.name);
   fileInput.value = "";
+});
+
+// Upload the textarea contents as a text file, named with the paste ext.
+function uploadText() {
+  const text = textInput.value;
+  if (!text.trim()) return;
+  const ext = pasteExtInput.value.trim() || "txt";
+  uploadBlob(new Blob([text], { type: "text/plain" }), "paste." + ext);
+  textInput.value = "";
+  syncUploadTextBtn();
+}
+
+function syncUploadTextBtn() {
+  uploadTextBtn.disabled = !textInput.value.trim();
+}
+
+textInput.addEventListener("input", syncUploadTextBtn);
+uploadTextBtn.addEventListener("click", uploadText);
+
+// Cmd/Ctrl+Enter uploads the typed text.
+textInput.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    uploadText();
+  }
+});
+
+// Pasting files/images into the compose box uploads them; plain text pastes
+// into the box normally so it can be edited before uploading.
+textInput.addEventListener("paste", (e) => {
+  const cd = e.clipboardData;
+  if (cd && cd.files && cd.files.length) {
+    e.preventDefault();
+    for (const file of cd.files) uploadBlob(file, file.name);
+  }
 });
 
 dropzone.addEventListener("dragover", (e) => {

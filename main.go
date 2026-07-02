@@ -34,7 +34,7 @@ func main() {
 		log.Fatalf("opening data dir: %v", err)
 	}
 
-	handler := server.New(st, preview.NewRegistry(preview.NewText()), server.Options{
+	handler := server.New(st, preview.NewRegistry(preview.NewMarkdown(), preview.NewText(), preview.NewMedia()), server.Options{
 		BaseURL:           *baseURL,
 		MaxSize:           *maxSize,
 		DefaultExpireDays: *defaultExpireDays,

@@ -16,7 +16,7 @@ type ListEntry struct {
 	UploadedAt time.Time `json:"uploadedAt"`
 }
 
-// List returns named files (those with a slug) newest-first. The cursor is
+// List returns uploaded files newest-first. The cursor is
 // "<month-dir>/<filename>" of the last returned entry; resumption is by
 // strict less-than comparison, so a deleted cursor file is harmless. An empty
 // nextCursor means no more pages.
@@ -63,7 +63,7 @@ func (s *Store) List(cursor string, limit int) (entries []ListEntry, nextCursor 
 				continue
 			}
 			id, err := ParseID(name)
-			if err != nil || id.Slug == "" {
+			if err != nil {
 				continue
 			}
 			info, err := os.Stat(filepath.Join(s.dataDir, month, name))

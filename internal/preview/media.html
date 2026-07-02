@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.ID}}</title>
+<style>
+  :root { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; background: #0b0d12; color: #e6edf3; }
+  .fs-header {
+    padding: 8px 12px;
+    font-size: 13px;
+    border-bottom: 1px solid #1f2733;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    background: #10141b;
+  }
+  .fs-header .fs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fs-header a { color: #58a6ff; text-decoration: none; margin-left: 12px; }
+  .fs-header a:hover { text-decoration: underline; }
+  .fs-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(100vh - 40px);
+    padding: 16px;
+  }
+  .fs-stage video,
+  .fs-stage img { max-width: 100%; max-height: calc(100vh - 72px); }
+  .fs-stage audio { width: min(640px, 100%); }
+</style>
+</head>
+<body>
+<div class="fs-header">
+  <span class="fs-name">{{.ID}}</span>
+  <span>
+    <a href="/{{.ID}}?raw=1" target="_blank" rel="noopener">raw</a>
+    <a href="/{{.ID}}?dl=1">download</a>
+  </span>
+</div>
+<div class="fs-stage">
+  {{if eq .Kind "video"}}
+  <video controls playsinline preload="metadata">
+    <source src="/{{.ID}}?raw=1" type="{{.MimeType}}">
+    Your browser can't play this video. <a href="/{{.ID}}?dl=1">Download it</a> instead.
+  </video>
+  {{else if eq .Kind "audio"}}
+  <audio controls preload="metadata">
+    <source src="/{{.ID}}?raw=1" type="{{.MimeType}}">
+    Your browser can't play this audio. <a href="/{{.ID}}?dl=1">Download it</a> instead.
+  </audio>
+  {{else}}
+  <img src="/{{.ID}}?raw=1" alt="{{.ID}}">
+  {{end}}
+</div>
+</body>
+</html>
