@@ -2,43 +2,74 @@
 
 NOTE: This project is a work in progress, not yet ready for widespread use.
 
-A simple, single-binary, self-hosted filesharing service.
+A simple, single-binary, self-hosted filesharing service. No database, no external dependencies — just a binary and a data directory.
 
-- **Share instantly**: the share URL is returned the moment an upload starts; downloaders tail-follow in-progress uploads and receive new chunks as they are written (and get cut off if the upload fails). Allows sharing large files without waiting for the upload to finish.
+## Features
+
+- **Share instantly**: the share URL is returned the moment an upload starts. Downloaders tail-follow in-progress uploads and receive chunks as they are written, so you can share large files without waiting for the upload to finish.
 - **Paste or drop**: paste text (or screenshots) anywhere on the page, or drag files into the dropzone.
-- **Previews**: text files render as syntax-highlighted pages ([chroma](https://github.com/alecthomas/chroma)); images, audio, and video are served with the right content type so the browser renders them natively. Append `?raw=1` for the raw bytes, `?dl=1` to force a download.
+- **End-to-end-ish encryption**: optionally encrypt uploads with AES-256-GCM. A random key is generated in your browser and lives only in the share link's `#fragment` — it is never stored on the server, and the original filename is sealed inside the ciphertext so the URL leaks nothing about the content.
+- **Rich previews**: text renders as syntax-highlighted pages ([chroma](https://github.com/alecthomas/chroma)), Markdown renders formatted, images/audio/video get native players, and zip/tar/tar.gz archives show their file listing. Append `?raw=1` for raw bytes, `?dl=1` to force a download.
 - **Expiration**: uploads default to expiring after 1 year (choose 1 day / 1 week / 1 month / 1 year / never in the UI). A background job garbage-collects expired files hourly.
 - **No database**: everything lives on the filesystem.
 
-## Usage
+## Installation
+
+### Docker (recommended)
+
+Images are published to `ghcr.io` on each release.
+
+```sh
+docker run -p 8080:8080 -v fileferry-data:/data ghcr.io/garethgeorge/fileferry:latest
+```
+
+### Docker Compose
+
+```yaml
+services:
+  fileferry:
+    image: ghcr.io/garethgeorge/fileferry:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - fileferry-data:/data
+    environment:
+      FILEFERRY_DATA_DIR: /data
+      FILEFERRY_BASE_URL: https://files.example.com
+      FILEFERRY_MAX_SIZE: "10737418240" # 10 GiB
+    restart: unless-stopped
+
+volumes:
+  fileferry-data:
+```
+
+### From source
 
 ```sh
 go build -o fileferry .
 ./fileferry --addr :8080 --data-dir ./data
 ```
 
-Or with Docker (images are published to ghcr.io on each release):
+### Configuration
 
-```sh
-docker run -p 8080:8080 -v fileferry-data:/data ghcr.io/garethgeorge/fileferry:latest
-```
+Every option can be set with a command-line flag or the matching environment
+variable. If both are given, the flag wins; otherwise the env var is used, and
+finally the default. Env vars are usually the easiest route for Docker.
 
-Flags:
-
-| Flag                    | Default              | Meaning                               |
-| ----------------------- | -------------------- | ------------------------------------- |
-| `--addr`                | `:8080`              | listen address                        |
-| `--data-dir`            | `./data`             | where files are stored                |
-| `--base-url`            | derived from request | base URL used in returned share links |
-| `--max-size`            | 10 GiB               | maximum upload size in bytes          |
-| `--default-expire-days` | 365                  | default expiration (0 = never)        |
+| Flag                    | Env var                         | Default              | Meaning                               |
+| ----------------------- | ------------------------------- | -------------------- | ------------------------------------- |
+| `--addr`                | `FILEFERRY_ADDR`                | `:8080`              | listen address                        |
+| `--data-dir`            | `FILEFERRY_DATA_DIR`            | `./data`             | where files are stored                |
+| `--base-url`            | `FILEFERRY_BASE_URL`            | derived from request | base URL used in returned share links |
+| `--max-size`            | `FILEFERRY_MAX_SIZE`            | 10 GiB               | maximum upload size in bytes          |
+| `--default-expire-days` | `FILEFERRY_DEFAULT_EXPIRE_DAYS` | 365                  | default expiration in days (0 = never) |
 
 ## Authentication
 
 fileferry has no built-in auth, by design. Everything privileged (the UI and
 all APIs) lives under `/upload/`; put an authenticating reverse proxy in front
-of that path prefix. Download URLs (`/<fileid>`) are public but file IDs are 
-unguessable. Have your reverse proxy set `X-Forwarded-Proto` and `X-Forwarded-Host` 
+of that path prefix. Download URLs (`/<fileid>`) are public but file IDs are
+unguessable. Have your reverse proxy set `X-Forwarded-Proto` and `X-Forwarded-Host`
 (or set `--base-url`) so share links are correct.
 
 ## Storage Layout

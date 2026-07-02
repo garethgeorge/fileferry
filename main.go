@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,12 +22,37 @@ import (
 // version is stamped by goreleaser at release time.
 var version = "dev"
 
+// Every flag falls back to a FILEFERRY_-prefixed environment variable when not
+// passed explicitly, so the service can be configured entirely through the
+// environment (the norm for containers). Precedence: flag > env var > default.
+func envStr(name, def string) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+	return def
+}
+
+func envInt64(name string, def int64) int64 {
+	if v, ok := os.LookupEnv(name); ok {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			log.Fatalf("invalid %s=%q: %v", name, v, err)
+		}
+		return n
+	}
+	return def
+}
+
+func envInt(name string, def int) int {
+	return int(envInt64(name, int64(def)))
+}
+
 func main() {
-	addr := flag.String("addr", ":8080", "listen address")
-	dataDir := flag.String("data-dir", "./data", "directory for uploaded files")
-	baseURL := flag.String("base-url", "", "base URL for share links (default: derived from the request)")
-	maxSize := flag.Int64("max-size", 10<<30, "maximum upload size in bytes")
-	defaultExpireDays := flag.Int("default-expire-days", 365, "default expiration in days (0 = never)")
+	addr := flag.String("addr", envStr("FILEFERRY_ADDR", ":8080"), "listen address")
+	dataDir := flag.String("data-dir", envStr("FILEFERRY_DATA_DIR", "./data"), "directory for uploaded files")
+	baseURL := flag.String("base-url", envStr("FILEFERRY_BASE_URL", ""), "base URL for share links (default: derived from the request)")
+	maxSize := flag.Int64("max-size", envInt64("FILEFERRY_MAX_SIZE", 10<<30), "maximum upload size in bytes")
+	defaultExpireDays := flag.Int("default-expire-days", envInt("FILEFERRY_DEFAULT_EXPIRE_DAYS", 365), "default expiration in days (0 = never)")
 	flag.Parse()
 
 	st, err := store.New(*dataDir)
