@@ -18,6 +18,11 @@ import (
 	"github.com/garethgeorge/fileferry/internal/store"
 )
 
+const (
+	testKey  = "test-key"
+	testKey2 = "second-key"
+)
+
 func newTestServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 	dataDir := t.TempDir()
@@ -28,6 +33,8 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	h := server.New(st, preview.NewRegistry(preview.NewText()), server.Options{
 		MaxSize:           1 << 30,
 		DefaultExpireDays: 365,
+		APIKeys:           []string{testKey, testKey2},
+		WebUIKey:          testKey,
 	})
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
@@ -39,13 +46,26 @@ type createResponse struct {
 	URL string `json:"url"`
 }
 
-func createUpload(t *testing.T, ts *httptest.Server, filename, slug string, expireDays int) createResponse {
+// apiPost issues an authenticated JSON POST to the given API path.
+func apiPost(t *testing.T, ts *httptest.Server, path, body string) *http.Response {
 	t.Helper()
-	body := fmt.Sprintf(`{"filename":%q,"slug":%q,"expireDays":%d}`, filename, slug, expireDays)
-	resp, err := http.Post(ts.URL+"/upload/api/create", "application/json", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func createUpload(t *testing.T, ts *httptest.Server, filename, slug string, expireDays int) createResponse {
+	t.Helper()
+	body := fmt.Sprintf(`{"filename":%q,"slug":%q,"expireDays":%d}`, filename, slug, expireDays)
+	resp := apiPost(t, ts, "/api/create", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("create: status %d", resp.StatusCode)
@@ -59,10 +79,11 @@ func createUpload(t *testing.T, ts *httptest.Server, filename, slug string, expi
 
 func putBytes(t *testing.T, ts *httptest.Server, id string, content []byte) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, ts.URL+"/upload/api/put/"+id, bytes.NewReader(content))
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+id, bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+testKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -74,10 +95,7 @@ func putBytes(t *testing.T, ts *httptest.Server, id string, content []byte) *htt
 func createEncryptedUpload(t *testing.T, ts *httptest.Server, filename string) createResponse {
 	t.Helper()
 	body := fmt.Sprintf(`{"filename":%q,"encrypt":true}`, filename)
-	resp, err := http.Post(ts.URL+"/upload/api/create", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := apiPost(t, ts, "/api/create", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("create: status %d", resp.StatusCode)
@@ -94,10 +112,11 @@ func createEncryptedUpload(t *testing.T, ts *httptest.Server, filename string) c
 
 func putEncrypted(t *testing.T, ts *httptest.Server, id, key, filename string, content []byte) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, ts.URL+"/upload/api/put/"+id, bytes.NewReader(content))
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+id, bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+testKey)
 	req.Header.Set("X-Encryption-Key", key)
 	req.Header.Set("X-Filename", filename)
 	resp, err := http.DefaultClient.Do(req)
@@ -315,11 +334,12 @@ func TestTailFollowOverHTTP(t *testing.T) {
 	pr, pw := io.Pipe()
 	putDone := make(chan error, 1)
 	go func() {
-		req, err := http.NewRequest(http.MethodPut, ts.URL+"/upload/api/put/"+cr.ID, pr)
+		req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+cr.ID, pr)
 		if err != nil {
 			putDone <- err
 			return
 		}
+		req.Header.Set("Authorization", "Bearer "+testKey)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			putDone <- err
@@ -385,7 +405,8 @@ func TestAbortTerminatesFollower(t *testing.T) {
 
 	pr, pw := io.Pipe()
 	go func() {
-		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/upload/api/put/"+cr.ID, pr)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+cr.ID, pr)
+		req.Header.Set("Authorization", "Bearer "+testKey)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
@@ -416,7 +437,8 @@ func TestConcurrentPutConflicts(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	go func() {
-		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/upload/api/put/"+cr.ID, pr)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+cr.ID, pr)
+		req.Header.Set("Authorization", "Bearer "+testKey)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
@@ -450,7 +472,8 @@ func TestDeleteEndpoint(t *testing.T) {
 	cr := createUpload(t, ts, "gone.txt", "delete me", 365)
 	putBytes(t, ts, cr.ID, []byte("bye"))
 
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/upload/api/file/"+cr.ID, nil)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/file/"+cr.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+testKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -523,7 +546,9 @@ func TestListEndpoint(t *testing.T) {
 	unnamed := createUpload(t, ts, "b.txt", "", 365)
 	putBytes(t, ts, unnamed.ID, []byte("bbb"))
 
-	resp, err := http.Get(ts.URL + "/upload/api/list?limit=10")
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/list?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,5 +633,67 @@ func TestIndexAndRedirects(t *testing.T) {
 	// The client follows the redirect to /upload/.
 	if resp.Request.URL.Path != "/upload/" {
 		t.Fatalf("/ landed on %s, want /upload/", resp.Request.URL.Path)
+	}
+}
+
+// The /api surface rejects requests without a valid Bearer key and accepts any
+// configured key.
+func TestAPIRequiresBearerKey(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	// No Authorization header at all.
+	resp, err := http.Post(ts.URL+"/api/create", "application/json", strings.NewReader(`{"filename":"x.txt"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("keyless create: status %d, want 401", resp.StatusCode)
+	}
+
+	// A bogus key is rejected.
+	for _, key := range []string{"wrong-key", ""} {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/list", nil)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("bogus key %q: status %d, want 401", key, resp.StatusCode)
+		}
+	}
+
+	// A second configured key (not the web-UI key) is accepted.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/list", nil)
+	req.Header.Set("Authorization", "Bearer "+testKey2)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second configured key: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// The admin UI is served the ephemeral web key via /upload/config.js, and that
+// key authenticates against /api.
+func TestConfigJSInjectsWebUIKey(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/upload/config.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Fatalf("config.js Content-Type = %q", ct)
+	}
+	if !strings.Contains(string(body), `window.FF_API_KEY = "`+testKey+`"`) {
+		t.Fatalf("config.js does not inject the web UI key: %q", body)
 	}
 }

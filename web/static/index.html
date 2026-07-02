@@ -96,7 +96,7 @@
           </svg>
         </summary>
         <div class="space-y-5 border-t border-slate-100 px-5 py-5">
-          <p class="text-xs text-slate-500">Uploading is a two-step API — create a slot, then <span class="font-mono">PUT</span> the bytes. These snippets need <span class="font-mono">jq</span>. If your instance is behind reverse-proxy auth, add your credentials (e.g. <span class="font-mono">curl -u user:pass</span>).</p>
+          <p class="text-xs text-slate-500">Uploading is a two-step API — create a slot, then <span class="font-mono">PUT</span> the bytes, authenticating with a <span class="font-mono">Bearer</span> key. These snippets carry a working key and need <span class="font-mono">jq</span>. The key below is ephemeral (it rotates when the server restarts); for a durable key set <span class="font-mono">FILEFERRY_API_KEY</span>.</p>
 
           <div>
             <div class="mb-1.5 flex items-center justify-between">
@@ -112,14 +112,6 @@
               <button type="button" class="cmd-copy shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50" data-target="cmd-stdin">Copy</button>
             </div>
             <pre id="cmd-stdin" class="overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 text-xs leading-relaxed text-slate-100"><code></code></pre>
-          </div>
-
-          <div>
-            <div class="mb-1.5 flex items-center justify-between">
-              <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">wget · upload a file</span>
-              <button type="button" class="cmd-copy shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50" data-target="cmd-wget">Copy</button>
-            </div>
-            <pre id="cmd-wget" class="overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 text-xs leading-relaxed text-slate-100"><code></code></pre>
           </div>
         </div>
       </details>
@@ -140,6 +132,7 @@
     </section>
 
   </main>
+  <script src="/upload/config.js"></script>
   <script src="/upload/static/app.js"></script>
 </body>
 </html>

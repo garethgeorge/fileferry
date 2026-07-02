@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,17 +17,38 @@ type ListEntry struct {
 	UploadedAt time.Time `json:"uploadedAt"`
 }
 
-// List returns uploaded files newest-first. The cursor is
-// "<month-dir>/<filename>" of the last returned entry; resumption is by
-// strict less-than comparison, so a deleted cursor file is harmless. An empty
-// nextCursor means no more pages.
+// candidate is a file within a single month directory, carrying everything
+// needed to order it precisely: the day parsed from its ID (coarse, matches
+// what's visible in the ID/URL) and its filesystem mtime (fine-grained
+// tiebreak for files sharing a day, since IDs deliberately don't encode more
+// than day-granularity).
+type candidate struct {
+	name  string
+	id    FileID
+	mtime int64 // UnixNano
+	size  int64
+}
+
+// List returns uploaded files newest-first, ordered by day (as encoded in the
+// ID) and, for files sharing a day, by actual upload time (filesystem mtime)
+// — a plain name sort would otherwise order same-day files by their random
+// nonce. The cursor is "<month-dir>/<mtime>/<filename>" of the last returned
+// entry; resumption compares against that triple without touching disk, so a
+// deleted cursor file is harmless.
 func (s *Store) List(cursor string, limit int) (entries []ListEntry, nextCursor string, err error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	var curMonth, curName string
-	if i := strings.IndexByte(cursor, '/'); i > 0 {
-		curMonth, curName = cursor[:i], cursor[i+1:]
+	var curDay int
+	var curMtime int64
+	if parts := strings.SplitN(cursor, "/", 3); len(parts) == 3 {
+		curMonth = parts[0]
+		curName = parts[2]
+		curMtime, _ = strconv.ParseInt(parts[1], 10, 64)
+		if id, err := ParseID(curName); err == nil {
+			curDay = id.Day
+		}
 	}
 
 	dirs, err := os.ReadDir(s.dataDir)
@@ -49,36 +71,62 @@ func (s *Store) List(cursor string, limit int) (entries []ListEntry, nextCursor 
 		if err != nil {
 			continue
 		}
-		names := make([]string, 0, len(files))
+		candidates := make([]candidate, 0, len(files))
 		for _, f := range files {
 			if f.IsDir() {
 				continue
 			}
-			names = append(names, f.Name())
+			id, err := ParseID(f.Name())
+			if err != nil {
+				continue
+			}
+			info, err := os.Stat(filepath.Join(s.dataDir, month, f.Name()))
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				name:  f.Name(),
+				id:    id,
+				mtime: info.ModTime().UnixNano(),
+				size:  info.Size(),
+			})
 		}
-		sort.Sort(sort.Reverse(sort.StringSlice(names)))
+		sort.Slice(candidates, func(i, j int) bool {
+			a, b := candidates[i], candidates[j]
+			if a.id.Day != b.id.Day {
+				return a.id.Day > b.id.Day
+			}
+			if a.mtime != b.mtime {
+				return a.mtime > b.mtime
+			}
+			return a.name > b.name
+		})
 
-		for _, name := range names {
-			if month == curMonth && name >= curName {
-				continue
-			}
-			id, err := ParseID(name)
-			if err != nil {
-				continue
-			}
-			info, err := os.Stat(filepath.Join(s.dataDir, month, name))
-			if err != nil {
-				continue
+		for _, c := range candidates {
+			if month == curMonth {
+				var atOrBeforeCursor bool
+				switch {
+				case c.id.Day != curDay:
+					atOrBeforeCursor = c.id.Day > curDay
+				case c.mtime != curMtime:
+					atOrBeforeCursor = c.mtime > curMtime
+				default:
+					atOrBeforeCursor = c.name >= curName
+				}
+				if atOrBeforeCursor {
+					continue
+				}
 			}
 			entries = append(entries, ListEntry{
-				ID:         name,
-				Slug:       id.Slug,
-				Ext:        id.Ext,
-				Size:       info.Size(),
-				UploadedAt: id.UploadedAt(),
+				ID:         c.name,
+				Slug:       c.id.Slug,
+				Ext:        c.id.Ext,
+				Size:       c.size,
+				UploadedAt: c.id.UploadedAt(),
 			})
 			if len(entries) == limit {
-				return entries, month + "/" + name, nil
+				next := month + "/" + strconv.FormatInt(c.mtime, 10) + "/" + c.name
+				return entries, next, nil
 			}
 		}
 	}

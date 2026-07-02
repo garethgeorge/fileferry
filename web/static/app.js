@@ -1,5 +1,13 @@
 "use strict";
 
+// ---- API auth -------------------------------------------------------------
+// The backend injects an ephemeral key via /upload/config.js (window.FF_API_KEY);
+// every /api call carries it as a Bearer token.
+const API_KEY = window.FF_API_KEY || "";
+function authHeaders() {
+  return { Authorization: "Bearer " + API_KEY };
+}
+
 // ---- DOM references -------------------------------------------------------
 const descriptionInput = document.getElementById("description");
 const expiresSelect = document.getElementById("expires");
@@ -168,9 +176,9 @@ async function uploadBlob(blob, filename) {
 
   let created;
   try {
-    const res = await fetch("/upload/api/create", {
+    const res = await fetch("/api/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ filename, slug, expireDays, encrypt }),
     });
     if (!res.ok) throw new Error("create failed: " + res.status);
@@ -194,7 +202,8 @@ async function uploadBlob(blob, filename) {
   const status = card.querySelector(".upload-status");
 
   const xhr = new XMLHttpRequest();
-  xhr.open("PUT", "/upload/api/put/" + encodeURIComponent(created.id));
+  xhr.open("PUT", "/api/put/" + encodeURIComponent(created.id));
+  xhr.setRequestHeader("Authorization", "Bearer " + API_KEY);
   if (encrypt) {
     // The key and the original filename travel as headers, not query params:
     // the filename is embedded (encrypted) so the ".encr" URL leaks no type.
@@ -301,7 +310,7 @@ async function loadNextPage() {
   try {
     const params = new URLSearchParams({ limit: "50" });
     if (nextCursor) params.set("cursor", nextCursor);
-    const res = await fetch("/upload/api/list?" + params.toString());
+    const res = await fetch("/api/list?" + params.toString(), { headers: authHeaders() });
     if (!res.ok) throw new Error("list failed: " + res.status);
     const data = await res.json();
     const entries = data.entries || [];
@@ -374,8 +383,9 @@ function renderFileRow(entry) {
   delBtn.addEventListener("click", async () => {
     if (!confirm("Delete " + (entry.slug || entry.id) + "?")) return;
     try {
-      const res = await fetch("/upload/api/file/" + encodeURIComponent(entry.id), {
+      const res = await fetch("/api/file/" + encodeURIComponent(entry.id), {
         method: "DELETE",
+        headers: authHeaders(),
       });
       if (res.status === 204) {
         forgetKey(entry.id);
@@ -520,37 +530,21 @@ observer.observe(sentinel);
 // Build the sample commands against the live origin so they're copy-paste
 // ready, then wire the per-snippet Copy buttons.
 function initTerminalSnippets() {
-  const api = window.location.origin + "/upload/api";
+  const origin = window.location.origin;
+  const api = origin + "/api";
   const snippets = {
     "cmd-curl":
-`FILE=./notes.txt
-
-# 1) create an upload slot (captures the id + share url)
-RESP=$(curl -sS -X POST ${api}/create \\
-  -H 'Content-Type: application/json' \\
-  -d "{\\"filename\\":\\"$(basename "$FILE")\\",\\"expireDays\\":365}")
-ID=$(echo "$RESP" | jq -r .id)
-
-# 2) upload the bytes, then print the share link
-curl -sS -X PUT --data-binary @"$FILE" ${api}/put/$ID \\
-  && echo "$RESP" | jq -r .url`,
+`KEY=${API_KEY}; F=./notes.txt
+ID=$(curl -sS ${api}/create -H "Authorization: Bearer $KEY" \\
+  -d "{\\"filename\\":\\"$(basename "$F")\\"}" | jq -r .id)
+curl -sS -X PUT ${api}/put/$ID -H "Authorization: Bearer $KEY" --data-binary @"$F"
+echo ${origin}/$ID`,
     "cmd-stdin":
-`ID=$(curl -sS -X POST ${api}/create \\
-  -H 'Content-Type: application/json' \\
+`KEY=${API_KEY}
+ID=$(curl -sS ${api}/create -H "Authorization: Bearer $KEY" \\
   -d '{"filename":"paste.txt"}' | jq -r .id)
-
-echo "hello from the terminal" | curl -sS -X PUT --data-binary @- ${api}/put/$ID
-echo "${window.location.origin}/$ID"`,
-    "cmd-wget":
-`FILE=./notes.txt
-
-ID=$(wget -qO- --method=POST \\
-  --header='Content-Type: application/json' \\
-  --body-data="{\\"filename\\":\\"$(basename "$FILE")\\"}" \\
-  ${api}/create | jq -r .id)
-
-wget -qO- --method=PUT --body-file="$FILE" ${api}/put/$ID
-echo "${window.location.origin}/$ID"`,
+echo "hello" | curl -sS -X PUT ${api}/put/$ID -H "Authorization: Bearer $KEY" --data-binary @-
+echo ${origin}/$ID`,
   };
 
   for (const [id, cmd] of Object.entries(snippets)) {

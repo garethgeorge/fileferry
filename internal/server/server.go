@@ -1,9 +1,11 @@
-// Package server wires fileferry's HTTP routes: the upload UI and API under
-// /upload/ (auth is delegated to a reverse proxy on that prefix) and public
-// file downloads at /{fileid}.
+// Package server wires fileferry's HTTP routes: the admin UI under /upload/
+// (meant to sit behind a reverse proxy; it injects a working API key into the
+// page), the Bearer-authenticated upload API under /api/, and public file
+// downloads at /{fileid}.
 package server
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -20,6 +22,12 @@ type Options struct {
 	MaxSize int64
 	// DefaultExpireDays applies when a create request omits expireDays.
 	DefaultExpireDays int
+	// APIKeys is the set of tokens accepted as a Bearer credential on /api/*.
+	// It holds the operator-configured keys plus a per-process ephemeral key.
+	APIKeys []string
+	// WebUIKey is the ephemeral key handed to the browser (via /upload/config.js)
+	// so the admin UI can talk to /api. It is also present in APIKeys.
+	WebUIKey string
 }
 
 type Server struct {
@@ -41,16 +49,65 @@ func New(st *store.Store, previews *preview.Registry, opts Options) http.Handler
 	mux.HandleFunc("GET /upload/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, web.Static, "static/index.html")
 	})
+	// config.js is rendered by the backend (not a static asset) so it can inject
+	// the ephemeral web-UI key; it lives under /upload/, behind the admin proxy.
+	mux.HandleFunc("GET /upload/config.js", s.handleConfigJS)
 	mux.Handle("GET /upload/static/", http.StripPrefix("/upload/", http.FileServerFS(web.Static)))
 
-	mux.HandleFunc("POST /upload/api/create", s.handleCreate)
-	mux.HandleFunc("PUT /upload/api/put/{id}", s.handlePut)
-	mux.HandleFunc("GET /upload/api/list", s.handleList)
-	mux.HandleFunc("DELETE /upload/api/file/{id}", s.handleDelete)
+	// The upload API is Bearer-authenticated so it can be exposed without the
+	// proxy that gates the admin UI.
+	mux.HandleFunc("POST /api/create", s.requireAuth(s.handleCreate))
+	mux.HandleFunc("PUT /api/put/{id}", s.requireAuth(s.handlePut))
+	mux.HandleFunc("GET /api/list", s.requireAuth(s.handleList))
+	mux.HandleFunc("DELETE /api/file/{id}", s.requireAuth(s.handleDelete))
 
 	mux.HandleFunc("GET /{fileid}", s.handleDownload)
 
 	return mux
+}
+
+// handleConfigJS serves a tiny script that seeds the browser with the ephemeral
+// API key. The key is hex, so it embeds safely in the JS string literal.
+func (s *Server) handleConfigJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write([]byte("window.FF_API_KEY = \"" + s.opts.WebUIKey + "\";\n"))
+}
+
+// bearerToken extracts the token from an "Authorization: Bearer <token>" header,
+// or returns "" if the header is missing or not a bearer credential.
+func bearerToken(h string) string {
+	const prefix = "bearer "
+	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(prefix):])
+}
+
+// validKey reports whether tok matches any configured key. It compares against
+// every key with a constant-time compare and never short-circuits, so it does
+// not leak (via timing) which key matched or how far the scan got.
+func (s *Server) validKey(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	var matched int
+	for _, k := range s.opts.APIKeys {
+		matched |= subtle.ConstantTimeCompare([]byte(tok), []byte(k))
+	}
+	return matched == 1
+}
+
+// requireAuth wraps a handler, rejecting requests without a valid Bearer key.
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.validKey(bearerToken(r.Header.Get("Authorization"))) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) baseURL(r *http.Request) string {

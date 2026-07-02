@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,13 +50,46 @@ func envInt(name string, def int) int {
 	return int(envInt64(name, int64(def)))
 }
 
+// parseKeys splits a comma-separated key list, trimming whitespace and dropping
+// empty entries.
+func parseKeys(s string) []string {
+	var keys []string
+	for _, k := range strings.Split(s, ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// randomKey returns a fresh 256-bit key, hex-encoded (64 chars).
+func randomKey() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		log.Fatalf("generating api key: %v", err)
+	}
+	return hex.EncodeToString(b[:])
+}
+
 func main() {
 	addr := flag.String("addr", envStr("FILEFERRY_ADDR", ":8080"), "listen address")
 	dataDir := flag.String("data-dir", envStr("FILEFERRY_DATA_DIR", "./data"), "directory for uploaded files")
 	baseURL := flag.String("base-url", envStr("FILEFERRY_BASE_URL", ""), "base URL for share links (default: derived from the request)")
 	maxSize := flag.Int64("max-size", envInt64("FILEFERRY_MAX_SIZE", 10<<30), "maximum upload size in bytes")
 	defaultExpireDays := flag.Int("default-expire-days", envInt("FILEFERRY_DEFAULT_EXPIRE_DAYS", 365), "default expiration in days (0 = never)")
+	apiKey := flag.String("api-key", envStr("FILEFERRY_API_KEY", ""), "comma-separated Bearer keys accepted on /api (a random ephemeral key is always added for the web UI)")
 	flag.Parse()
+
+	// Bearer keys for /api: the operator-configured list plus one ephemeral key
+	// minted per process. The ephemeral key is what the web UI uses; since it
+	// rotates on every restart, the UI's credential has a limited lifetime. It is
+	// delivered to the browser via /upload/config.js and never logged.
+	persistentKeys := parseKeys(*apiKey)
+	webUIKey := randomKey()
+	apiKeys := append(append([]string{}, persistentKeys...), webUIKey)
+	if len(persistentKeys) == 0 {
+		log.Print("no FILEFERRY_API_KEY set: only the web UI can upload (ephemeral key); set FILEFERRY_API_KEY for scripted/API access")
+	}
 
 	st, err := store.New(*dataDir)
 	if err != nil {
@@ -64,6 +100,8 @@ func main() {
 		BaseURL:           *baseURL,
 		MaxSize:           *maxSize,
 		DefaultExpireDays: *defaultExpireDays,
+		APIKeys:           apiKeys,
+		WebUIKey:          webUIKey,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -81,14 +81,71 @@ set, the flag wins; otherwise the env var is used, then the default.
 | `--base-url`            | `FILEFERRY_BASE_URL`            | derived from request | base URL used in returned share links  |
 | `--max-size`            | `FILEFERRY_MAX_SIZE`            | 10 GiB               | maximum upload size in bytes           |
 | `--default-expire-days` | `FILEFERRY_DEFAULT_EXPIRE_DAYS` | 365                  | default expiration in days (0 = never) |
+| `--api-key`             | `FILEFERRY_API_KEY`             | _(none)_             | comma-separated Bearer keys for `/api` (an ephemeral key for the web UI is always added) |
 
 ## Authentication
 
-fileferry has no built-in auth by design. Everything privileged lives under
-`/upload/`; put an authenticating reverse proxy in front of that prefix.
+There are two privileged surfaces:
+
+- **The upload API — `/api/*`** — is authenticated with a Bearer token. Every
+  request must send `Authorization: Bearer <key>`, where `<key>` is any entry in
+  `FILEFERRY_API_KEY` (a comma-separated list). This is the surface curl scripts,
+  the macOS keybind below, and the web UI all post to; it can be exposed directly
+  to the internet.
+- **The admin UI — `/upload/`** — is the static web panel. It has no built-in auth,
+  so put an authenticating reverse proxy in front of that prefix. On load it injects
+  an **ephemeral** API key into the page (regenerated every time the server starts)
+  so uploads from the browser just work — no key to paste. Because that key rotates
+  on restart, use a value from `FILEFERRY_API_KEY` for anything that must persist
+  (scripts, the keybind).
+
 Download URLs (`/<fileid>`) are public, but file IDs are unguessable. Have the
 proxy set `X-Forwarded-Proto` and `X-Forwarded-Host` (or set `--base-url`) so
 share links are correct.
+
+### Uploading from the terminal
+
+Create a slot, then `PUT` the bytes, authenticating with a key from
+`FILEFERRY_API_KEY`. Needs [`jq`](https://jqlang.github.io/jq/):
+
+```sh
+KEY=your-api-key; BASE=https://files.example.com; F=./notes.txt
+ID=$(curl -sS $BASE/api/create -H "Authorization: Bearer $KEY" \
+  -d "{\"filename\":\"$(basename "$F")\"}" | jq -r .id)
+curl -sS -X PUT $BASE/api/put/$ID -H "Authorization: Bearer $KEY" --data-binary @"$F"
+echo $BASE/$ID
+```
+
+### macOS: upload the clipboard with a keybind
+
+Upload whatever is on the clipboard and replace it with the share URL — great for
+screenshots. Save this as a script (fill in your own `KEY` and `BASE`). It uploads
+an image if the clipboard holds one (via [`pngpaste`](https://github.com/jcsalterego/pngpaste),
+`brew install pngpaste`), otherwise the clipboard text:
+
+```sh
+#!/bin/bash
+KEY=your-api-key; BASE=https://files.example.com
+if pngpaste - >/tmp/ff.png 2>/dev/null; then F=/tmp/ff.png; N=clip.png
+else pbpaste >/tmp/ff.txt; F=/tmp/ff.txt; N=clip.txt; fi
+ID=$(curl -sS $BASE/api/create -H "Authorization: Bearer $KEY" \
+  -d "{\"filename\":\"$N\"}" | jq -r .id)
+curl -sS -X PUT $BASE/api/put/$ID -H "Authorization: Bearer $KEY" --data-binary @"$F"
+printf '%s' "$BASE/$ID" | pbcopy
+```
+
+Bind it to a hotkey natively:
+
+1. **Automator → New Document → Quick Action.** Set "Workflow receives" to
+   *no input*.
+2. Add a **Run Shell Script** action and paste the script. Save it as e.g.
+   "Upload clipboard".
+3. **System Settings → Keyboard → Keyboard Shortcuts → Services**, find "Upload
+   clipboard" under General, and assign a shortcut.
+
+Now that shortcut uploads the clipboard and leaves the share URL ready to paste.
+Deps: `jq`, plus `pngpaste` for image support (a text-only version needs only
+`pbpaste`/`pbcopy`).
 
 ## Development
 
