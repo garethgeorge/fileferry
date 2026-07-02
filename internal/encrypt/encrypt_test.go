@@ -27,7 +27,10 @@ func TestRoundtrip(t *testing.T) {
 	for _, size := range []int{0, 1, chunkSize - 1, chunkSize, chunkSize + 1, 3*chunkSize + 7} {
 		plaintext := bytes.Repeat([]byte("fileferry-encryption!"), size/21+1)[:size]
 		ct := roundtrip(t, "correct horse", plaintext)
-		if size > 0 && bytes.Contains(ct, plaintext) {
+		// Only meaningful once the plaintext is long enough that a coincidental
+		// byte match in the random-looking ciphertext is astronomically
+		// unlikely; for tiny inputs (e.g. a single byte) a match is expected.
+		if size >= 16 && bytes.Contains(ct, plaintext) {
 			t.Fatalf("size %d: ciphertext contains plaintext", size)
 		}
 
