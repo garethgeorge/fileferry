@@ -17,8 +17,9 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
-        with:
-          release-type: go
+        # Config lives in release-please-config.json + .release-please-manifest.json
+        # (manifest mode). The manifest is release-please's source of truth for the
+        # last-released version — without it the action re-proposes the same release.
 
   # Always runs after release-please (in the same workflow because tags/releases
   # created with the default GITHUB_TOKEN do not trigger other workflows). When
