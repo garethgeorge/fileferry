@@ -1,0 +1,66 @@
+version: 2
+
+project_name: fileferry
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+# release-please owns the changelog and the GitHub release; goreleaser only
+# attaches artifacts to it.
+changelog:
+  disable: true
+
+release:
+  mode: keep-existing
+
+dockers:
+  - image_templates:
+      - ghcr.io/garethgeorge/fileferry:{{ .Version }}-amd64
+    use: buildx
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.source=https://github.com/garethgeorge/fileferry
+      - --label=org.opencontainers.image.version={{ .Version }}
+  - image_templates:
+      - ghcr.io/garethgeorge/fileferry:{{ .Version }}-arm64
+    goarch: arm64
+    use: buildx
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.source=https://github.com/garethgeorge/fileferry
+      - --label=org.opencontainers.image.version={{ .Version }}
+
+docker_manifests:
+  - name_template: ghcr.io/garethgeorge/fileferry:{{ .Version }}
+    image_templates:
+      - ghcr.io/garethgeorge/fileferry:{{ .Version }}-amd64
+      - ghcr.io/garethgeorge/fileferry:{{ .Version }}-arm64
+  - name_template: ghcr.io/garethgeorge/fileferry:latest
+    image_templates:
+      - ghcr.io/garethgeorge/fileferry:{{ .Version }}-amd64
+      - ghcr.io/garethgeorge/fileferry:{{ .Version }}-arm64

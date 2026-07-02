@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.ID}}</title>
+<style>
+  :root { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; }
+  .fs-header {
+    padding: 8px 12px;
+    font-size: 13px;
+    border-bottom: 1px solid #e1e4e8;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .fs-header .fs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fs-header a { color: #0366d6; text-decoration: none; }
+  .fs-header a:hover { text-decoration: underline; }
+  .fs-code { padding: 8px 12px; overflow-x: auto; }
+  .fs-code pre { margin: 0; }
+</style>
+</head>
+<body>
+<div class="fs-header">
+  <span class="fs-name">{{.ID}}</span>
+  <a href="/{{.ID}}?raw=1">raw</a>
+</div>
+<div class="fs-code">{{.Code}}</div>
+</body>
+</html>
