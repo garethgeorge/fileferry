@@ -51,7 +51,7 @@ func (s *Store) List(cursor string, limit int) (entries []ListEntry, nextCursor 
 		}
 		names := make([]string, 0, len(files))
 		for _, f := range files {
-			if f.IsDir() || strings.HasSuffix(f.Name(), ".tmp") {
+			if f.IsDir() {
 				continue
 			}
 			names = append(names, f.Name())

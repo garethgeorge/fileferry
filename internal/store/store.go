@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -18,7 +17,12 @@ var (
 	ErrConflict = errors.New("upload already claimed")
 )
 
-const expirationsDir = "expirations"
+const (
+	expirationsDir = "expirations"
+	// inprogressDir holds uploads still being written. Completed uploads are
+	// renamed out of it into the month-based hierarchy; it is wiped on startup.
+	inprogressDir = "inprogress"
+)
 
 type Store struct {
 	dataDir string
@@ -29,40 +33,22 @@ type Store struct {
 	expMu sync.Mutex // serializes expiration-index appends/rewrites
 }
 
-// New opens (creating if needed) the data directory and removes orphaned .tmp
-// files. It runs before the server accepts requests, so no active upload can
-// own a .tmp yet — every one found is a crash leftover.
+// New opens (creating if needed) the data directory. The inprogress directory
+// is wiped and recreated: it runs before the server accepts requests, so every
+// file it holds is an upload interrupted by a crash, and destroying them is the
+// desired recovery.
 func New(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dataDir, expirationsDir), 0o755); err != nil {
 		return nil, err
 	}
-	s := &Store{dataDir: dataDir, active: make(map[string]*ActiveUpload)}
-	if err := s.sweepTemp(); err != nil {
+	inprogress := filepath.Join(dataDir, inprogressDir)
+	if err := os.RemoveAll(inprogress); err != nil {
 		return nil, err
 	}
-	return s, nil
-}
-
-func (s *Store) sweepTemp() error {
-	dirs, err := os.ReadDir(s.dataDir)
-	if err != nil {
-		return err
+	if err := os.MkdirAll(inprogress, 0o755); err != nil {
+		return nil, err
 	}
-	for _, d := range dirs {
-		if !d.IsDir() || !isMonthDir(d.Name()) {
-			continue
-		}
-		entries, err := os.ReadDir(filepath.Join(s.dataDir, d.Name()))
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), ".tmp") {
-				os.Remove(filepath.Join(s.dataDir, d.Name(), e.Name()))
-			}
-		}
-	}
-	return nil
+	return &Store{dataDir: dataDir, active: make(map[string]*ActiveUpload)}, nil
 }
 
 // isMonthDir reports whether name looks like "2026-07".
@@ -85,8 +71,10 @@ func (s *Store) finalPath(id FileID) string {
 	return filepath.Join(s.dataDir, id.MonthDir(), id.String())
 }
 
+// tempPath is where an upload is written while in progress. The inprogress
+// directory is flat; IDs are globally unique, so there are no collisions.
 func (s *Store) tempPath(id FileID) string {
-	return s.finalPath(id) + ".tmp"
+	return filepath.Join(s.dataDir, inprogressDir, id.String())
 }
 
 // OpenResult is either a completed file (File+Info set, use http.ServeContent)
@@ -106,7 +94,8 @@ func (res *OpenResult) Close() error {
 
 // Open resolves an ID to its content. The lookup order closes the race with a
 // concurrent Commit rename: final path, then the active-upload registry, then
-// the .tmp (a miss there means we raced the rename), then the final path again.
+// the in-progress file (a miss there means we raced the rename), then the final
+// path again.
 func (s *Store) Open(ctx context.Context, id FileID) (*OpenResult, error) {
 	if res, err := s.openFinal(id); err == nil {
 		return res, nil

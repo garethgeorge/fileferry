@@ -25,9 +25,9 @@ type ActiveUpload struct {
 	id FileID
 
 	mu      sync.Mutex
-	size    int64 // bytes durably written to the .tmp file
+	size    int64 // bytes durably written to the in-progress file
 	done    bool  // renamed to the final path
-	err     error // upload failed; .tmp removed
+	err     error // upload failed; in-progress file removed
 	claimed bool  // a writer has attached
 	notify  chan struct{}
 	timer   *time.Timer // claim timeout
@@ -46,14 +46,11 @@ func (u *ActiveUpload) state() (size int64, done bool, err error, notify <-chan 
 }
 
 // BeginUpload reserves the ID — regenerating the nonce on collision, so the
-// returned FileID is authoritative — creates the .tmp so readers can tail it
-// immediately, registers the upload, and records the expiration (zero
-// expiresAt means never). If no writer attaches within claimTimeout the
+// returned FileID is authoritative — creates the in-progress file so readers
+// can tail it immediately, registers the upload, and records the expiration
+// (zero expiresAt means never). If no writer attaches within claimTimeout the
 // upload is aborted.
 func (s *Store) BeginUpload(id FileID, expiresAt time.Time) (FileID, error) {
-	if err := os.MkdirAll(filepath.Join(s.dataDir, id.MonthDir()), 0o755); err != nil {
-		return FileID{}, err
-	}
 	var f *os.File
 	err := errors.New("no attempt")
 	for try := 0; try < 4 && err != nil; try++ {
@@ -122,10 +119,10 @@ func (s *Store) AttachWriter(id FileID) (*UploadWriter, error) {
 }
 
 // finishUpload moves an upload to its terminal state exactly once: commit
-// renames .tmp to the final path, abort removes the .tmp and records cause.
-// onlyIfUnclaimed makes it a no-op once a writer attached (claim-timeout path).
-// The file operation happens under u.mu so readers observe file state and
-// upload state consistently.
+// renames the in-progress file into the month hierarchy, abort removes it and
+// records cause. onlyIfUnclaimed makes it a no-op once a writer attached
+// (claim-timeout path). The file operation happens under u.mu so readers
+// observe file state and upload state consistently.
 func (s *Store) finishUpload(u *ActiveUpload, commit bool, cause error, onlyIfUnclaimed bool) error {
 	u.mu.Lock()
 	if u.done || u.err != nil {
@@ -142,7 +139,10 @@ func (s *Store) finishUpload(u *ActiveUpload, commit bool, cause error, onlyIfUn
 	}
 	var err error
 	if commit {
-		if err = os.Rename(s.tempPath(u.id), s.finalPath(u.id)); err != nil {
+		if err = os.MkdirAll(filepath.Join(s.dataDir, u.id.MonthDir()), 0o755); err == nil {
+			err = os.Rename(s.tempPath(u.id), s.finalPath(u.id))
+		}
+		if err != nil {
 			u.err = err
 			os.Remove(s.tempPath(u.id))
 		} else {
@@ -169,7 +169,7 @@ func (s *Store) abortUpload(u *ActiveUpload, cause error) {
 	s.finishUpload(u, false, cause, false)
 }
 
-// UploadWriter streams an upload's bytes into the .tmp file, publishing
+// UploadWriter streams an upload's bytes into the in-progress file, publishing
 // progress to tailing readers. Invariant: size is incremented only after the
 // bytes are in the file, so a reader that observes size can always ReadAt up
 // to it.
@@ -210,8 +210,8 @@ func (w *UploadWriter) Commit() error {
 	return w.s.finishUpload(w.u, true, nil, false)
 }
 
-// Abort fails the upload: the .tmp is removed and tailing readers receive
-// cause from their next Read.
+// Abort fails the upload: the in-progress file is removed and tailing readers
+// receive cause from their next Read.
 func (w *UploadWriter) Abort(cause error) {
 	w.f.Close()
 	w.s.abortUpload(w.u, cause)

@@ -353,13 +353,17 @@ func TestLateReaderGetsFullFile(t *testing.T) {
 	}
 }
 
-func TestStartupSweepRemovesOrphanedTemp(t *testing.T) {
+func TestStartupWipesInProgressUploads(t *testing.T) {
 	dir := t.TempDir()
 	month := filepath.Join(dir, "2026-06")
+	inprogress := filepath.Join(dir, "inprogress")
 	if err := os.MkdirAll(month, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	orphan := filepath.Join(month, "ap-aaaaaa.bin.tmp")
+	if err := os.MkdirAll(inprogress, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(inprogress, "ap-aaaaaa.bin")
 	keep := filepath.Join(month, "ap-bbbbbb.bin")
 	os.WriteFile(orphan, []byte("partial"), 0o644)
 	os.WriteFile(keep, []byte("complete"), 0o644)
@@ -368,9 +372,13 @@ func TestStartupSweepRemovesOrphanedTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
-		t.Fatal("orphaned .tmp survived the startup sweep")
+		t.Fatal("interrupted upload survived startup")
 	}
 	if _, err := os.Stat(keep); err != nil {
-		t.Fatal("completed file was removed by the startup sweep")
+		t.Fatal("completed file was removed on startup")
+	}
+	// The inprogress dir must still exist and be ready for new uploads.
+	if info, err := os.Stat(inprogress); err != nil || !info.IsDir() {
+		t.Fatal("inprogress dir missing after startup")
 	}
 }
