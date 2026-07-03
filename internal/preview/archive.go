@@ -45,6 +45,12 @@ func NewArchive() Previewer {
 
 type archive struct{}
 
+// sized is implemented by sources whose exact size differs from f.Size, e.g.
+// a decrypting reader over an encrypted file: f.Size there is only the
+// ciphertext length, used solely to gate large-file previews (see Matches).
+// When a source implements this, ServeHTTP prefers it for archive parsing.
+type sized interface{ Size() int64 }
+
 type archiveEntry struct {
 	Name    string
 	SizeStr string
@@ -101,7 +107,15 @@ func (a *archive) ServeHTTP(w http.ResponseWriter, r *http.Request, f File) erro
 	switch {
 	case ext == "zip" && hasReaderAt && seekable:
 		kind = "zip"
-		entries, truncated, err = listZip(ra, f.Size)
+		// f.Size is exact for a plaintext source but only an upper bound for
+		// an encrypted one (it's the ciphertext size); prefer the source's
+		// own exact size when it knows better, e.g. encrypt.RandomAccessReader
+		// via io.SectionReader.
+		size := f.Size
+		if sz, ok := rc.(sized); ok {
+			size = sz.Size()
+		}
+		entries, truncated, err = listZip(ra, size)
 		if errors.Is(err, errNotArchive) {
 			return rawFallback()
 		}

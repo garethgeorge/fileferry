@@ -24,6 +24,14 @@ type noCloseFile struct{ *os.File }
 
 func (noCloseFile) Close() error { return nil }
 
+// noCloseSection exposes an *io.SectionReader's Read/Seek/ReadAt/Size to a
+// previewer while making Close a no-op: the section reader holds no resource
+// of its own (it decrypts on demand from the underlying file, owned and
+// closed elsewhere).
+type noCloseSection struct{ *io.SectionReader }
+
+func (noCloseSection) Close() error { return nil }
+
 // handleDownload serves /{fileid}: a preview when one applies, else raw
 // content.
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -74,11 +82,13 @@ func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request, forceRaw 
 	defer res.Close()
 
 	// Resolve the content to serve. A plaintext completed file is seekable, so
-	// it supports range requests and repeatable preview reads. An encrypted
-	// file is wrapped in a decrypting reader (validating the key up front, so a
-	// wrong key is rejected before any bytes are written) with its real
-	// extension recovered from the embedded filename; the decrypted stream is
-	// not seekable, so it is served like an in-progress upload.
+	// it supports range requests and repeatable preview reads. A completed
+	// encrypted file gets the same treatment via a random-access decrypting
+	// reader (validating the key up front, so a wrong key is rejected before
+	// any bytes are written), with its real extension recovered from the
+	// embedded filename. Only a still-uploading file — plaintext or encrypted
+	// — is limited to a single forward pass, since its remaining bytes don't
+	// exist yet to seek into.
 	ext := id.Ext
 	filename := id.String()
 	var seeker io.ReadSeeker
@@ -87,12 +97,31 @@ func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request, forceRaw 
 	var previewOpen func() (io.ReadCloser, error)
 
 	switch {
-	case encrypted:
-		src := io.Reader(res.File)
-		if res.File == nil {
-			src = res.Tail
+	case encrypted && res.File != nil:
+		ra, raerr := encrypt.NewRandomAccessReader(res.File, res.Info.Size(), key)
+		if errors.Is(raerr, encrypt.ErrWrongKey) {
+			http.Error(w, "Wrong key", http.StatusForbidden)
+			return
+		} else if raerr != nil {
+			log.Printf("decrypt %s: %v", id.String(), raerr)
+			http.Error(w, "could not decrypt file", http.StatusInternalServerError)
+			return
 		}
-		dr, derr := encrypt.NewReader(src, key)
+		if name := string(ra.Meta()); name != "" {
+			filename = name
+			ext = strings.TrimPrefix(filepath.Ext(name), ".")
+		}
+		// io.SectionReader turns the decrypting ReaderAt into a full
+		// Read/Seek/ReadAt view: seeker gets range-request support (a plain
+		// encrypted download can now be scrubbed/resumed, same as plaintext),
+		// and previewOpen gets the same random access the plaintext branch
+		// below uses to avoid buffering archives into memory.
+		sr := io.NewSectionReader(ra, 0, ra.Size())
+		seeker = sr
+		previewOpen = func() (io.ReadCloser, error) { return noCloseSection{sr}, nil }
+	case encrypted:
+		// Still uploading, so only a forward, single-pass stream exists.
+		dr, derr := encrypt.NewReader(res.Tail, key)
 		if errors.Is(derr, encrypt.ErrWrongKey) {
 			http.Error(w, "Wrong key", http.StatusForbidden)
 			return
@@ -106,12 +135,6 @@ func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request, forceRaw 
 			ext = strings.TrimPrefix(filepath.Ext(name), ".")
 		}
 		stream = dr
-		// Completed encrypted files can be previewed: the previewer reads the
-		// decrypted stream (it consumes dr exactly once, and the preview and raw
-		// branches are mutually exclusive, so sharing dr is safe).
-		if res.File != nil {
-			previewOpen = func() (io.ReadCloser, error) { return io.NopCloser(dr), nil }
-		}
 	case res.File != nil:
 		seeker = res.File
 		modTime = res.Info.ModTime()
