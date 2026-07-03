@@ -1,6 +1,8 @@
-// ferryupload is a small, self-contained CLI for fileferry. It uploads a
-// file, a clipboard snippet, or stdin, and prints exactly the resulting share
-// URL to stdout — everything else (progress, errors, notes) goes to stderr.
+// ferryupload is a small, self-contained CLI for fileferry. It uploads a file
+// or directory, the clipboard's contents (text, an image, or a copied
+// file/folder), or stdin, and prints exactly the resulting share URL to stdout
+// — everything else (progress, errors, notes) goes to stderr. Directories are
+// compressed first: a .zip on Windows, a .tar.gz everywhere else.
 package main
 
 import (
@@ -10,9 +12,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -61,7 +63,7 @@ func main() {
 	flag.BoolVar(&encrypt, "e", false, "shorthand for --encrypt")
 	flag.StringVar(&slug, "slug", "", "URL suffix, e.g. my-notes")
 	flag.StringVar(&filenameOverride, "filename", "", "override the uploaded filename")
-	flag.BoolVar(&useClipboard, "clipboard", false, "read input from (and write the result back to) the system clipboard")
+	flag.BoolVar(&useClipboard, "clipboard", false, "read input from (and write the result back to) the system clipboard: text, an image, or a copied file/folder")
 	flag.BoolVar(&useClipboard, "c", false, "shorthand for --clipboard")
 	flag.BoolVar(&shortenLink, "shortenlink", false, "treat the input as a single URL and upload it as a short link, served as a redirect instead of raw text")
 	flag.BoolVar(&quiet, "quiet", false, "suppress the progress bar")
@@ -79,8 +81,9 @@ func main() {
 	flag.Func("x", "shorthand for --expire-days", expireFlag)
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `ferryupload uploads a file, clipboard snippet, or stdin to a fileferry
-server and prints the resulting share URL.
+		fmt.Fprintf(os.Stderr, `ferryupload uploads a file or directory, the clipboard, or stdin to a
+fileferry server and prints the resulting share URL. Directories are
+compressed first (.zip on Windows, .tar.gz elsewhere).
 
 Usage:
   ferryupload [flags] [path]
@@ -122,7 +125,7 @@ Flags:
 		body     io.Reader
 		size     int64 = -1
 		filename string
-		closer   io.Closer
+		cleanup  func()
 	)
 
 	switch {
@@ -130,35 +133,43 @@ Flags:
 		if err := clipboard.Init(); err != nil {
 			fatalf("clipboard unavailable: %v", err)
 		}
-		text := clipboard.Read(clipboard.FmtText)
-		if len(text) == 0 {
-			fatalf("clipboard is empty or contains no text")
+		if p, ok := clipboardFilePath(); ok {
+			// A Finder/Explorer "Copy" of a file or folder: upload the actual
+			// item (prepareFile archives it first if it's a directory).
+			b, sz, name, clean, err := prepareFile(p, quiet)
+			if err != nil {
+				fatalf("clipboard file: %v", err)
+			}
+			body, size, filename, cleanup = b, sz, name, clean
+		} else if text := clipboard.Read(clipboard.FmtText); len(text) > 0 {
+			if existing := ownShareURL(string(text), serverURL); existing != "" {
+				fmt.Fprintln(os.Stderr, "ferryupload: clipboard already holds a fileferry link, skipping upload")
+				fmt.Println(existing)
+				return
+			}
+			body = bytes.NewReader(text)
+			size = int64(len(text))
+			filename = "clipboard.txt"
+		} else if data, name, ok := clipboardBinary(); ok {
+			// A screenshot or other rich content (image, PDF, HTML, …).
+			body = bytes.NewReader(data)
+			size = int64(len(data))
+			filename = name
+		} else {
+			fatalf("clipboard is empty or holds no content ferryupload can read")
 		}
-		if existing := ownShareURL(string(text), serverURL); existing != "" {
-			fmt.Fprintln(os.Stderr, "ferryupload: clipboard already holds a fileferry link, skipping upload")
-			fmt.Println(existing)
-			return
-		}
-		body = bytes.NewReader(text)
-		size = int64(len(text))
-		filename = "clipboard.txt"
 	case path != "":
-		f, err := os.Open(path)
+		b, sz, name, clean, err := prepareFile(path, quiet)
 		if err != nil {
-			fatalf("open %s: %v", path, err)
+			fatalf("%v", err)
 		}
-		closer = f
-		if st, err := f.Stat(); err == nil {
-			size = st.Size()
-		}
-		body = f
-		filename = filepath.Base(path)
+		body, size, filename, cleanup = b, sz, name, clean
 	default:
 		body = os.Stdin
 		filename = "paste.txt"
 	}
-	if closer != nil {
-		defer closer.Close()
+	if cleanup != nil {
+		defer cleanup()
 	}
 	if filenameOverride != "" {
 		filename = filenameOverride
@@ -254,6 +265,106 @@ func isShortcutURL(content []byte) (string, bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// clipboardFilePath reports a single local file or directory path when the
+// clipboard holds a file reference — a Finder/Explorer/file-manager "Copy" of an
+// item rather than its contents. The per-platform lookup lives in clipboardFiles
+// (macOS pasteboard file URLs, Windows CF_HDROP, freedesktop URI lists). When
+// several items are copied, the first is used and the rest are noted on stderr.
+func clipboardFilePath() (string, bool) {
+	paths := clipboardFiles()
+	if len(paths) == 0 {
+		return "", false
+	}
+	if len(paths) > 1 {
+		fmt.Fprintf(os.Stderr, "ferryupload: clipboard holds %d items; uploading only the first (%s)\n", len(paths), paths[0])
+	}
+	return paths[0], true
+}
+
+// fileURIToPath converts a single "file://" URI to a local filesystem path.
+// Non-file schemes (e.g. http) return ok=false so a copied hyperlink is left for
+// the text/short-link handling instead of being opened as a file. On macOS a
+// pasteboard file URL is often a file-reference URL (file:///.file/id=…) that
+// resolveFileURL turns into a real path; elsewhere url.Path already holds it
+// (already percent-decoded, with an empty or "localhost" host).
+func fileURIToPath(uri string) (string, bool) {
+	uri = strings.TrimSpace(uri)
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "file" {
+		return "", false
+	}
+	if p, ok := resolveFileURL(uri); ok {
+		return p, true
+	}
+	return u.Path, true
+}
+
+// parseURIList extracts local file paths from a freedesktop URI list. With
+// gnomeFormat the first line is an action word ("copy"/"cut", the
+// x-special/gnome-copied-files convention) and is dropped. Comment lines (starting
+// with '#') and non-file URIs are ignored.
+func parseURIList(list string, gnomeFormat bool) []string {
+	lines := strings.Split(list, "\n")
+	if gnomeFormat && len(lines) > 0 {
+		lines = lines[1:]
+	}
+	var paths []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if p, ok := fileURIToPath(line); ok {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// clipboardBinary returns the first non-text payload on the clipboard together
+// with a filename whose extension is inferred from its format: a screenshot as
+// clipboard.png, and any other rich type the library exposes (PDF, HTML, RTF, …)
+// under a matching extension. Text is skipped so the caller's link-dedup still
+// applies. It returns ok=false when there is no such content to read.
+func clipboardBinary() (data []byte, filename string, ok bool) {
+	for _, f := range clipboard.Formats() {
+		if f == clipboard.FmtText {
+			continue
+		}
+		if d := clipboard.Read(f); len(d) > 0 {
+			return d, "clipboard" + clipboardExt(f), true
+		}
+	}
+	return nil, "", false
+}
+
+// clipboardExt returns a filename extension (leading dot) for a clipboard
+// format, preferring common, readable choices and falling back to the mime
+// package, then ".bin" for anything unrecognized.
+func clipboardExt(f clipboard.Format) string {
+	if f == clipboard.FmtImage {
+		// The clipboard library returns image data PNG-encoded on every
+		// platform, so ".png" is always correct here.
+		return ".png"
+	}
+	mimeType := f.MIME()
+	if i := strings.IndexByte(mimeType, ';'); i >= 0 {
+		mimeType = mimeType[:i] // drop parameters like ;charset=utf-8
+	}
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "application/pdf":
+		return ".pdf"
+	case "text/html":
+		return ".html"
+	case "text/rtf", "application/rtf":
+		return ".rtf"
+	}
+	if exts, err := mime.ExtensionsByType(mimeType); err == nil && len(exts) > 0 {
+		return exts[0]
+	}
+	return ".bin"
 }
 
 // ownShareURL reports the trimmed text if it looks like a fileferry link this

@@ -62,3 +62,43 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	}
 	return n, err
 }
+
+// copyBar renders a progress bar for a local copy/compress step (archiving a
+// directory before upload). Unlike the upload bar it appears immediately rather
+// than only past progressThreshold, so directory archiving is never silent —
+// but it still stays out of non-terminal output and honors --quiet.
+type copyBar struct {
+	bar *progressbar.ProgressBar
+}
+
+func newCopyBar(total int64, desc string, quiet bool) *copyBar {
+	if quiet || !term.IsTerminal(int(os.Stderr.Fd())) {
+		return &copyBar{}
+	}
+	return &copyBar{
+		bar: progressbar.NewOptions64(total,
+			progressbar.OptionSetWriter(os.Stderr),
+			progressbar.OptionSetDescription(desc),
+			progressbar.OptionShowBytes(true),
+			progressbar.OptionSetWidth(30),
+			progressbar.OptionThrottle(100*time.Millisecond),
+			progressbar.OptionClearOnFinish(),
+			progressbar.OptionFullWidth(),
+		),
+	}
+}
+
+// wrap returns a reader that advances the bar as bytes flow through it. It is a
+// no-op passthrough when the bar is disabled.
+func (c *copyBar) wrap(r io.Reader) io.Reader {
+	if c.bar == nil {
+		return r
+	}
+	return io.TeeReader(r, c.bar)
+}
+
+func (c *copyBar) finish() {
+	if c.bar != nil {
+		c.bar.Finish()
+	}
+}
