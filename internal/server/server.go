@@ -55,9 +55,9 @@ func New(st *store.Store, previews *preview.Registry, opts Options) http.Handler
 	mux.Handle("GET /upload/static/", http.StripPrefix("/upload/", http.FileServerFS(web.Static)))
 
 	// The upload API is Bearer-authenticated so it can be exposed without the
-	// proxy that gates the admin UI.
-	mux.HandleFunc("POST /api/create", s.requireAuth(s.handleCreate))
-	mux.HandleFunc("PUT /api/put/{id}", s.requireAuth(s.handlePut))
+	// proxy that gates the admin UI. Upload is a single request: the id/URL is
+	// streamed back before the bytes finish (see handleUpload).
+	mux.HandleFunc("POST /api/upload", s.requireAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/list", s.requireAuth(s.handleList))
 	mux.HandleFunc("DELETE /api/file/{id}", s.requireAuth(s.handleDelete))
 

@@ -24,6 +24,10 @@ const filesEmpty = document.getElementById("files-empty");
 const sentinel = document.getElementById("sentinel");
 const encryptToggle = document.getElementById("encrypt-toggle");
 const encryptNote = document.getElementById("encrypt-note");
+const preserveToggle = document.getElementById("preserve-toggle");
+const optionsToggle = document.getElementById("options-toggle");
+const optionsPanel = document.getElementById("options-panel");
+const optionsChevron = document.getElementById("options-chevron");
 
 // ---- Helpers --------------------------------------------------------------
 // sanitizeSuffix mirrors what the server does to the URL suffix: lowercase and
@@ -38,6 +42,18 @@ descriptionInput.addEventListener("input", () => {
   descriptionInput.value = sanitizeSuffix(descriptionInput.value);
   descriptionInput.setSelectionRange(caret, caret);
 });
+
+// suffixFromFilename turns a dropped file's name into a URL suffix: it drops
+// the extension (the server re-derives the real one, so keeping it here would
+// duplicate it, e.g. "photo-png.png"), lowercases, collapses spaces/punctuation
+// to dashes, and caps the result at 40 characters.
+function suffixFromFilename(name) {
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  let s = base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (s.length > 40) s = s.slice(0, 40).replace(/-+$/g, "");
+  return s;
+}
 
 function humanSize(bytes) {
   if (bytes < 1024) return bytes + " B";
@@ -68,26 +84,64 @@ function randomKey() {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-// The Encrypt toggle is a remembered preference (on/off only — never a key).
-const ENCRYPT_PREF = "ff-encrypt";
-function syncEncrypt() {
-  const on = encryptToggle.checked;
-  encryptNote.classList.toggle("hidden", !on);
+// ---- Options (persisted advanced settings) --------------------------------
+// The advanced options row (encrypt, preserve filenames, expiry) and whether it
+// is expanded are all remembered in localStorage under one key. Only on/off and
+// choice settings are persisted — never a suffix (per-upload) or a key.
+const OPTIONS_KEY = "ff-options";
+const defaultOptions = { open: false, expireDays: 30, encrypt: false, preserveNames: true };
+
+function loadOptions() {
   try {
-    localStorage.setItem(ENCRYPT_PREF, on ? "1" : "0");
+    const raw = localStorage.getItem(OPTIONS_KEY);
+    if (raw) return Object.assign({}, defaultOptions, JSON.parse(raw));
+  } catch (err) {
+    /* ignore */
+  }
+  return Object.assign({}, defaultOptions);
+}
+function saveOptions() {
+  try {
+    localStorage.setItem(OPTIONS_KEY, JSON.stringify(options));
   } catch (err) {
     /* ignore */
   }
 }
-function restoreEncryptPref() {
-  try {
-    encryptToggle.checked = localStorage.getItem(ENCRYPT_PREF) === "1";
-  } catch (err) {
-    /* ignore */
-  }
-  encryptNote.classList.toggle("hidden", !encryptToggle.checked);
+
+const options = loadOptions();
+
+function setPanelOpen(open) {
+  options.open = open;
+  optionsPanel.classList.toggle("hidden", !open);
+  optionsChevron.classList.toggle("rotate-180", open);
+  optionsToggle.setAttribute("aria-expanded", open ? "true" : "false");
 }
-encryptToggle.addEventListener("change", syncEncrypt);
+
+// applyOptions reflects the persisted settings into the controls and panel;
+// syncOptions reads them back out (the controls are the source of truth on
+// change) and persists. Both keep the encryption note in step with the toggle.
+function applyOptions() {
+  expiresSelect.value = String(options.expireDays);
+  encryptToggle.checked = options.encrypt;
+  preserveToggle.checked = options.preserveNames;
+  encryptNote.classList.toggle("hidden", !options.encrypt);
+  setPanelOpen(options.open);
+}
+function syncOptions() {
+  options.expireDays = Number(expiresSelect.value);
+  options.encrypt = encryptToggle.checked;
+  options.preserveNames = preserveToggle.checked;
+  encryptNote.classList.toggle("hidden", !options.encrypt);
+  saveOptions();
+}
+
+optionsToggle.addEventListener("click", () => {
+  setPanelOpen(!options.open);
+  saveOptions();
+});
+expiresSelect.addEventListener("change", syncOptions);
+encryptToggle.addEventListener("change", syncOptions);
+preserveToggle.addEventListener("change", syncOptions);
 
 // Keys are stored only in this browser's localStorage, keyed by file id, so the
 // Files list can rebuild working share links. They never leave the browser
@@ -166,65 +220,89 @@ async function copyToClipboard(text, btn) {
 }
 
 // ---- Upload flow ----------------------------------------------------------
-async function uploadBlob(blob, filename) {
-  const slug = descriptionInput.value.trim();
-  const expireDays = Number(expiresSelect.value);
+// uploadBlob performs the whole upload in a single POST /api/upload. The server
+// streams back {id,url} before the bytes finish, so we reveal the share link
+// the moment that first line arrives (see tryReadUrl) while the progress bar
+// keeps tracking the transfer. fromFile marks real file uploads (drop / browse
+// / pasted files), which are eligible for filename-derived URL suffixes.
+async function uploadBlob(blob, filename, fromFile) {
+  // A typed suffix always wins; otherwise a file upload borrows its own name
+  // when the "preserve filenames" option is on.
+  let slug = descriptionInput.value.trim();
+  if (!slug && fromFile && options.preserveNames) slug = suffixFromFilename(filename);
+
   // Mint a fresh key per upload (never reused, never shown). Captured here so
   // later toggling doesn't affect an in-flight transfer.
-  const encrypt = encryptToggle.checked;
+  const encrypt = options.encrypt;
   const key = encrypt ? randomKey() : "";
 
-  let created;
-  try {
-    const res = await fetch("/api/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ filename, slug, expireDays, encrypt }),
-    });
-    if (!res.ok) throw new Error("create failed: " + res.status);
-    created = await res.json();
-  } catch (err) {
-    console.error(err);
-    renderUploadCard(filename, null, "failed");
-    return;
-  }
+  const params = new URLSearchParams({ filename, expireDays: String(options.expireDays) });
+  if (slug) params.set("slug", slug);
+  if (encrypt) params.set("encrypt", "true");
 
-  // The key never touches the URL path or query — it rides in the fragment
-  // (raw, with no "key=" prefix; the fragment is reserved for the key), which
-  // the browser keeps out of requests and thus out of server logs. Save it
-  // locally so the Files list can rebuild the link later on this browser.
-  const shareUrl = encrypt ? created.url + "#" + encodeURIComponent(key) : created.url;
-  if (encrypt) storeKey(created.id, key);
-
-  // Show the URL immediately, before bytes finish uploading.
-  const card = renderUploadCard(filename, shareUrl, "uploading");
-  const bar = card.querySelector(".upload-bar");
+  const card = renderUploadCard(filename);
   const status = card.querySelector(".upload-status");
+  const bar = card.querySelector(".upload-bar");
+  const urlRow = card.querySelector(".upload-url-row");
+  const urlInput = card.querySelector(".upload-url");
+  const copyBtn = card.querySelector(".upload-copy");
+
+  let shareUrl = "";
+  function showUrl(u) {
+    shareUrl = u;
+    urlInput.value = u;
+    urlRow.classList.remove("hidden");
+  }
+  copyBtn.addEventListener("click", () => {
+    if (shareUrl) copyToClipboard(shareUrl, copyBtn);
+  });
 
   const xhr = new XMLHttpRequest();
-  xhr.open("PUT", "/api/put/" + encodeURIComponent(created.id));
+  xhr.open("POST", "/api/upload?" + params.toString());
   xhr.setRequestHeader("Authorization", "Bearer " + API_KEY);
   if (encrypt) {
-    // The key and the original filename travel as headers, not query params:
-    // the filename is embedded (encrypted) so the ".encr" URL leaks no type.
+    // The key rides in a header (never the query string) so it stays out of
+    // access logs; the original filename travels as the ?filename param and is
+    // embedded (encrypted) server-side, so the ".encr" URL leaks no type.
     xhr.setRequestHeader("X-Encryption-Key", key);
-    xhr.setRequestHeader("X-Filename", encodeURIComponent(filename));
   }
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) {
-      const pct = Math.round((e.loaded / e.total) * 100);
-      bar.style.width = pct + "%";
+
+  // The server flushes the {id,url} JSON line before the bytes finish. Parse it
+  // as soon as it arrives so the link is shareable immediately; for an
+  // encrypted file we append the key fragment (raw, no "key=" prefix — the
+  // fragment is reserved for the key) and remember the key locally so the Files
+  // list can rebuild the link later on this browser.
+  let urlSeen = false;
+  function tryReadUrl() {
+    if (urlSeen || !xhr.responseText) return;
+    const nl = xhr.responseText.indexOf("\n");
+    const line = nl >= 0 ? xhr.responseText.slice(0, nl) : xhr.responseText;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (err) {
+      return; // the first line hasn't fully arrived yet
     }
+    if (!obj || !obj.url) return;
+    urlSeen = true;
+    if (encrypt) storeKey(obj.id, key);
+    showUrl(encrypt ? obj.url + "#" + encodeURIComponent(key) : obj.url);
+  }
+  xhr.onreadystatechange = () => {
+    if (xhr.readyState >= 3) tryReadUrl();
+  };
+  xhr.onprogress = tryReadUrl; // download-side bytes (the streamed URL line)
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) bar.style.width = Math.round((e.loaded / e.total) * 100) + "%";
   };
   xhr.onload = () => {
-    if (xhr.status === 204) {
+    if (xhr.status === 200) {
+      tryReadUrl();
       bar.style.width = "100%";
       status.textContent = "done";
       status.className = "upload-status text-xs font-medium text-emerald-600";
-      // Auto-copy the share URL to the clipboard (best-effort; the copy button
-      // shows "Copied!" feedback and copyToClipboard swallows failures).
-      const copyBtn = card.querySelector(".upload-copy");
-      if (copyBtn) copyToClipboard(shareUrl, copyBtn);
+      // Auto-copy the share URL (best-effort; copyToClipboard swallows failures).
+      if (shareUrl) copyToClipboard(shareUrl, copyBtn);
       // Refresh the Files list from page 1.
       resetFiles();
     } else {
@@ -240,54 +318,31 @@ function markFailed(status) {
   status.className = "upload-status text-xs font-medium text-red-600";
 }
 
-function renderUploadCard(filename, url, state) {
+// renderUploadCard builds an upload card in the "uploading" state. The share
+// URL row starts hidden and is revealed by uploadBlob once the server streams
+// the link back; the progress bar tracks the transfer throughout.
+function renderUploadCard(filename) {
   uploadsSection.classList.remove("hidden");
   const card = document.createElement("div");
   card.className = "rounded-lg border border-slate-200 bg-white p-4 shadow-sm";
-
-  const statusClass =
-    state === "failed"
-      ? "upload-status text-xs font-medium text-red-600"
-      : "upload-status text-xs font-medium text-slate-500";
-
   card.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
-      <span class="truncate text-sm font-medium text-slate-800">${escapeHtml(filename)}</span>
-      <span class="${statusClass}">${state}</span>
+      <span class="upload-name truncate text-sm font-medium text-slate-800"></span>
+      <span class="upload-status text-xs font-medium text-slate-500">uploading</span>
+    </div>
+    <div class="upload-url-row mb-2 hidden items-center gap-2 flex">
+      <input type="text" readonly
+        class="upload-url flex-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600 focus:outline-none" />
+      <button type="button"
+        class="upload-copy shrink-0 rounded-md bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700">Copy</button>
+    </div>
+    <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+      <div class="upload-bar h-full bg-indigo-600 transition-all duration-200" style="width: 0%"></div>
     </div>`;
-
-  if (url) {
-    const row = document.createElement("div");
-    row.className = "mb-2 flex items-center gap-2";
-    const input = document.createElement("input");
-    input.type = "text";
-    input.readOnly = true;
-    input.value = url;
-    input.className =
-      "flex-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600 focus:outline-none";
-    const copyBtn = document.createElement("button");
-    copyBtn.textContent = "Copy";
-    copyBtn.className =
-      "upload-copy shrink-0 rounded-md bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700";
-    copyBtn.addEventListener("click", () => copyToClipboard(url, copyBtn));
-    row.appendChild(input);
-    row.appendChild(copyBtn);
-    card.appendChild(row);
-
-    const track = document.createElement("div");
-    track.className = "h-1.5 w-full overflow-hidden rounded-full bg-slate-200";
-    track.innerHTML = `<div class="upload-bar h-full bg-indigo-600 transition-all duration-200" style="width: 0%"></div>`;
-    card.appendChild(track);
-  }
-
+  // Set the filename via textContent so it can't inject markup.
+  card.querySelector(".upload-name").textContent = filename;
   uploadsList.prepend(card);
   return card;
-}
-
-function escapeHtml(s) {
-  const div = document.createElement("div");
-  div.textContent = s;
-  return div.innerHTML;
 }
 
 // ---- Files list (paginated) ----------------------------------------------
@@ -408,7 +463,7 @@ function renderFileRow(entry) {
 browseBtn.addEventListener("click", () => fileInput.click());
 
 fileInput.addEventListener("change", () => {
-  for (const file of fileInput.files) uploadBlob(file, file.name);
+  for (const file of fileInput.files) uploadBlob(file, file.name, true);
   fileInput.value = "";
 });
 
@@ -418,7 +473,8 @@ function uploadText() {
   if (!text.trim()) return;
   // Always sent as paste.txt; a trailing extension in the URL suffix relabels
   // the served type for text content (see internal/store/id.go splitSuffixExt).
-  uploadBlob(new Blob([text], { type: "text/plain" }), "paste.txt");
+  // Not a file upload, so it never borrows a filename-derived suffix.
+  uploadBlob(new Blob([text], { type: "text/plain" }), "paste.txt", false);
   textInput.value = "";
   syncUploadTextBtn();
   syncCompose();
@@ -476,7 +532,7 @@ textInput.addEventListener("paste", (e) => {
   const cd = e.clipboardData;
   if (cd && cd.files && cd.files.length) {
     e.preventDefault();
-    for (const file of cd.files) uploadBlob(file, file.name);
+    for (const file of cd.files) uploadBlob(file, file.name, true);
   }
 });
 
@@ -491,7 +547,7 @@ dropzone.addEventListener("drop", (e) => {
   e.preventDefault();
   dropzone.classList.remove("border-indigo-500", "bg-indigo-50");
   if (e.dataTransfer && e.dataTransfer.files) {
-    for (const file of e.dataTransfer.files) uploadBlob(file, file.name);
+    for (const file of e.dataTransfer.files) uploadBlob(file, file.name, true);
   }
 });
 
@@ -507,13 +563,13 @@ document.addEventListener("paste", (e) => {
   if (!cd) return;
 
   if (cd.files && cd.files.length) {
-    for (const file of cd.files) uploadBlob(file, file.name);
+    for (const file of cd.files) uploadBlob(file, file.name, true);
     return;
   }
   const text = cd.getData("text/plain");
   if (text) {
     const blob = new Blob([text], { type: "text/plain" });
-    uploadBlob(blob, "paste.txt");
+    uploadBlob(blob, "paste.txt", false);
   }
 });
 
@@ -534,17 +590,19 @@ function initTerminalSnippets() {
   const api = origin + "/api";
   const snippets = {
     "cmd-curl":
-`KEY=${API_KEY}; F=./notes.txt
-ID=$(curl -sS ${api}/create -H "Authorization: Bearer $KEY" \\
-  -d "{\\"filename\\":\\"$(basename "$F")\\"}" | jq -r .id)
-curl -sS -X PUT ${api}/put/$ID -H "Authorization: Bearer $KEY" --data-binary @"$F"
-echo ${origin}/$ID`,
+`ff_upload() {
+  local key="\${FILEFERRY_API_KEY:-${API_KEY}}"
+  if [ -n "$1" ]; then
+    curl -sS -X POST "${api}/upload?filename=$(basename "$1")" \\
+      -H "Authorization: Bearer $key" --data-binary @"$1" | jq -r .url
+  else
+    curl -sS -X POST "${api}/upload?filename=paste.txt" \\
+      -H "Authorization: Bearer $key" --data-binary @- | jq -r .url
+  fi
+}`,
     "cmd-stdin":
-`KEY=${API_KEY}
-ID=$(curl -sS ${api}/create -H "Authorization: Bearer $KEY" \\
-  -d '{"filename":"paste.txt"}' | jq -r .id)
-echo "hello" | curl -sS -X PUT ${api}/put/$ID -H "Authorization: Bearer $KEY" --data-binary @-
-echo ${origin}/$ID`,
+`ff_upload ./notes.txt         # upload a file, prints its URL
+echo "hello" | ff_upload      # share text from stdin`,
   };
 
   for (const [id, cmd] of Object.entries(snippets)) {
@@ -562,7 +620,7 @@ echo ${origin}/$ID`,
 
 // Initial load.
 pruneKeys();
-restoreEncryptPref();
+applyOptions();
 initTerminalSnippets();
 syncCompose();
 loadNextPage();

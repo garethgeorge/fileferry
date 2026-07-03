@@ -163,9 +163,11 @@ func encryptionKey(r *http.Request) string {
 	return ""
 }
 
-// bootstrapCSP locks the bootstrap page down to its inline script: no network,
-// no rendering — it only sets the cookie and redirects.
-const bootstrapCSP = "default-src 'none'; script-src 'unsafe-inline'"
+// bootstrapCSP locks the bootstrap page down to its inline script and styles:
+// no network, no external resources — it only paints a progress card, sets the
+// cookie, and reloads. Inline styles are allowed so the page can render a
+// styled "Decrypting…" state instead of raw unstyled text.
+const bootstrapCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"
 
 // sandboxExempt reports whether raw content of this MIME type may be served
 // without the sandboxing CSP. Only inert types the browser renders with a

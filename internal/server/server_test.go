@@ -1,14 +1,18 @@
 package server_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,40 +50,26 @@ type createResponse struct {
 	URL string `json:"url"`
 }
 
-// apiPost issues an authenticated JSON POST to the given API path.
-func apiPost(t *testing.T, ts *httptest.Server, path, body string) *http.Response {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, ts.URL+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
+// uploadURL builds the single-call upload URL with its query metadata.
+func uploadURL(ts *httptest.Server, filename, slug string, expireDays int, encrypt bool) string {
+	v := url.Values{}
+	v.Set("filename", filename)
+	if slug != "" {
+		v.Set("slug", slug)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+testKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	v.Set("expireDays", strconv.Itoa(expireDays))
+	if encrypt {
+		v.Set("encrypt", "true")
 	}
-	return resp
+	return ts.URL + "/api/upload?" + v.Encode()
 }
 
-func createUpload(t *testing.T, ts *httptest.Server, filename, slug string, expireDays int) createResponse {
+// upload performs a full single-call upload and returns the {id,url} the server
+// streams back (which, for a non-streaming client like this, arrives once the
+// whole body has been sent).
+func upload(t *testing.T, ts *httptest.Server, filename, slug string, expireDays int, content []byte) createResponse {
 	t.Helper()
-	body := fmt.Sprintf(`{"filename":%q,"slug":%q,"expireDays":%d}`, filename, slug, expireDays)
-	resp := apiPost(t, ts, "/api/create", body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("create: status %d", resp.StatusCode)
-	}
-	var cr createResponse
-	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		t.Fatal(err)
-	}
-	return cr
-}
-
-func putBytes(t *testing.T, ts *httptest.Server, id string, content []byte) *http.Response {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+id, bytes.NewReader(content))
+	req, err := http.NewRequest(http.MethodPost, uploadURL(ts, filename, slug, expireDays, false), bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,43 +78,51 @@ func putBytes(t *testing.T, ts *httptest.Server, id string, content []byte) *htt
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	return resp
-}
-
-func createEncryptedUpload(t *testing.T, ts *httptest.Server, filename string) createResponse {
-	t.Helper()
-	body := fmt.Sprintf(`{"filename":%q,"encrypt":true}`, filename)
-	resp := apiPost(t, ts, "/api/create", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("create: status %d", resp.StatusCode)
+		t.Fatalf("upload: status %d", resp.StatusCode)
 	}
+	cr := decodeAndDrain(t, resp)
+	return cr
+}
+
+// decodeAndDrain parses the streamed {id,url} then reads the rest of the
+// response to EOF (as curl does) so the connection stays alive until the server
+// finishes writing the file — closing early would sever the still-uploading
+// request body.
+func decodeAndDrain(t *testing.T, resp *http.Response) createResponse {
+	t.Helper()
 	var cr createResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(cr.ID, ".encr") {
-		t.Fatalf("encrypted id %q does not end in .encr", cr.ID)
-	}
+	io.Copy(io.Discard, resp.Body)
 	return cr
 }
 
-func putEncrypted(t *testing.T, ts *httptest.Server, id, key, filename string, content []byte) *http.Response {
+// uploadEncrypted performs a single-call encrypted upload, passing the key in
+// the header (as the real client does).
+func uploadEncrypted(t *testing.T, ts *httptest.Server, filename, key string, content []byte) createResponse {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+id, bytes.NewReader(content))
+	req, err := http.NewRequest(http.MethodPost, uploadURL(ts, filename, "", 365, true), bytes.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	req.Header.Set("X-Encryption-Key", key)
-	req.Header.Set("X-Filename", filename)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	return resp
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("encrypted upload: status %d", resp.StatusCode)
+	}
+	cr := decodeAndDrain(t, resp)
+	if !strings.HasSuffix(cr.ID, ".encr") {
+		t.Fatalf("encrypted id %q does not end in .encr", cr.ID)
+	}
+	return cr
 }
 
 // getWithKey fetches a file supplying the decryption key via the header.
@@ -148,10 +146,7 @@ func TestEncryptedRoundtrip(t *testing.T) {
 	ts, dataDir := newTestServer(t)
 	const key = "correct horse battery staple"
 	content := bytes.Repeat([]byte("top secret payload\n"), 5000) // spans chunks
-	cr := createEncryptedUpload(t, ts, "diagram.png")
-	if resp := putEncrypted(t, ts, cr.ID, key, "diagram.png", content); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("encrypted put: status %d", resp.StatusCode)
-	}
+	cr := uploadEncrypted(t, ts, "diagram.png", key, content)
 
 	// The bytes on disk must be ciphertext, never the plaintext.
 	stored := readStored(t, dataDir, cr.ID)
@@ -179,8 +174,7 @@ func TestEncryptedRoundtrip(t *testing.T) {
 
 func TestEncryptedWrongKeyRefused(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createEncryptedUpload(t, ts, "notes.txt")
-	putEncrypted(t, ts, cr.ID, "right-key", "notes.txt", []byte("secret"))
+	cr := uploadEncrypted(t, ts, "notes.txt", "right-key", []byte("secret"))
 
 	resp := getWithKey(t, ts.URL+"/"+cr.ID, "wrong-key")
 	body, _ := io.ReadAll(resp.Body)
@@ -196,8 +190,7 @@ func TestEncryptedWrongKeyRefused(t *testing.T) {
 // A browser hit (no key header) gets the decryptor shell, not the ciphertext.
 func TestEncryptedNoKeyServesShell(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createEncryptedUpload(t, ts, "notes.txt")
-	putEncrypted(t, ts, cr.ID, "k", "notes.txt", []byte("secret"))
+	cr := uploadEncrypted(t, ts, "notes.txt", "k", []byte("secret"))
 
 	resp, err := http.Get(ts.URL + "/" + cr.ID)
 	if err != nil {
@@ -224,8 +217,7 @@ func TestEncryptedNoKeyServesShell(t *testing.T) {
 func TestEncryptedCookieRendersPreview(t *testing.T) {
 	ts, _ := newTestServer(t)
 	const key = "cookie-key"
-	cr := createEncryptedUpload(t, ts, "notes.txt")
-	putEncrypted(t, ts, cr.ID, key, "notes.txt", []byte("hello preview"))
+	cr := uploadEncrypted(t, ts, "notes.txt", key, []byte("hello preview"))
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+cr.ID, nil)
 	req.AddCookie(&http.Cookie{Name: "ffkey", Value: key})
@@ -247,12 +239,19 @@ func TestEncryptedCookieRendersPreview(t *testing.T) {
 	}
 }
 
-func TestEncryptedPutRequiresKey(t *testing.T) {
+func TestEncryptedUploadRequiresKey(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createEncryptedUpload(t, ts, "notes.txt")
-	// PUT without the key header must be rejected.
-	if resp := putBytes(t, ts, cr.ID, []byte("data")); resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("keyless encrypted put: status %d, want 400", resp.StatusCode)
+	// An encrypt=true upload with no key header must be rejected up front, before
+	// any id/url is streamed back.
+	req, _ := http.NewRequest(http.MethodPost, uploadURL(ts, "notes.txt", "", 365, true), strings.NewReader("data"))
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("keyless encrypted upload: status %d, want 400", resp.StatusCode)
 	}
 }
 
@@ -272,12 +271,9 @@ func readStored(t *testing.T, dataDir, id string) []byte {
 
 func TestUploadDownloadRoundtrip(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createUpload(t, ts, "notes.txt", "", 365)
+	cr := upload(t, ts, "notes.txt", "", 365, []byte("hello world"))
 	if !strings.HasSuffix(cr.URL, "/"+cr.ID) {
 		t.Fatalf("url %q does not end in id %q", cr.URL, cr.ID)
-	}
-	if resp := putBytes(t, ts, cr.ID, []byte("hello world")); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("put: status %d", resp.StatusCode)
 	}
 
 	// Raw download.
@@ -323,46 +319,72 @@ func TestUploadDownloadRoundtrip(t *testing.T) {
 	}
 }
 
-// A downloader that connects mid-upload must receive the whole file.
+// startRawUpload opens POST /api/upload over a raw connection with a chunked
+// body, sends the first chunk, and reads the id the server streams back ahead of
+// the body. A raw connection is used so the test can read the response and keep
+// sending body afterward (Go's http.Client won't surface the response until the
+// whole request body is written). It returns the id, a sender for more chunks,
+// and the connection for finishing or aborting.
+func startRawUpload(t *testing.T, ts *httptest.Server, filename string, first []byte) (string, func([]byte), net.Conn) {
+	t.Helper()
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		if _, err := fmt.Fprintf(conn, "%x\r\n", len(b)); err != nil {
+			t.Error(err)
+			return
+		}
+		conn.Write(b)
+		io.WriteString(conn, "\r\n")
+	}
+	head := "POST /api/upload?filename=" + filename + "&expireDays=365 HTTP/1.1\r\n" +
+		"Host: " + u.Host + "\r\n" +
+		"Authorization: Bearer " + testKey + "\r\n" +
+		"Transfer-Encoding: chunked\r\n\r\n"
+	if _, err := io.WriteString(conn, head); err != nil {
+		t.Fatal(err)
+	}
+	send(first)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload status %d", resp.StatusCode)
+	}
+	var cr createResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	return cr.ID, send, conn
+}
+
+// A downloader that connects mid-upload must receive the whole file, exercising
+// the streaming contract: the id/url is read from the response while the body is
+// still being written.
 func TestTailFollowOverHTTP(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createUpload(t, ts, "big.bin", "", 365)
 
 	chunk := bytes.Repeat([]byte("0123456789abcdef"), 1024)
 	const chunks = 8
 
-	pr, pw := io.Pipe()
-	putDone := make(chan error, 1)
-	go func() {
-		req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+cr.ID, pr)
-		if err != nil {
-			putDone <- err
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+testKey)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			putDone <- err
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNoContent {
-			putDone <- fmt.Errorf("put status %d", resp.StatusCode)
-			return
-		}
-		putDone <- nil
-	}()
+	id, send, conn := startRawUpload(t, ts, "big.bin", chunk)
 
-	// Publish the first chunk, then attach a follower before the rest.
-	if _, err := pw.Write(chunk); err != nil {
-		t.Fatal(err)
-	}
+	// Attach a follower before writing the rest.
 	time.Sleep(50 * time.Millisecond)
-
 	getBody := make(chan []byte, 1)
 	getErr := make(chan error, 1)
 	go func() {
-		resp, err := http.Get(ts.URL + "/" + cr.ID)
+		resp, err := http.Get(ts.URL + "/" + id)
 		if err != nil {
 			getErr <- err
 			return
@@ -377,14 +399,10 @@ func TestTailFollowOverHTTP(t *testing.T) {
 	}()
 
 	for i := 1; i < chunks; i++ {
-		if _, err := pw.Write(chunk); err != nil {
-			t.Fatal(err)
-		}
+		send(chunk)
 	}
-	pw.Close()
-	if err := <-putDone; err != nil {
-		t.Fatal(err)
-	}
+	io.WriteString(conn, "0\r\n\r\n") // terminating chunk: clean end of upload
+	defer conn.Close()
 
 	select {
 	case err := <-getErr:
@@ -401,54 +419,20 @@ func TestTailFollowOverHTTP(t *testing.T) {
 // When the uploader dies, followers must see a broken transfer, not clean EOF.
 func TestAbortTerminatesFollower(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createUpload(t, ts, "doomed.bin", "", 365)
 
-	pr, pw := io.Pipe()
-	go func() {
-		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+cr.ID, pr)
-		req.Header.Set("Authorization", "Bearer "+testKey)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-	if _, err := pw.Write([]byte("some partial data")); err != nil {
-		t.Fatal(err)
-	}
+	id, _, conn := startRawUpload(t, ts, "doomed.bin", []byte("some partial data"))
 	time.Sleep(50 * time.Millisecond)
 
-	resp, err := http.Get(ts.URL + "/" + cr.ID)
+	resp, err := http.Get(ts.URL + "/" + id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 
-	pw.CloseWithError(fmt.Errorf("uploader crashed"))
+	conn.Close() // drop the connection without a terminating chunk
 
 	if _, err := io.ReadAll(resp.Body); err == nil {
 		t.Fatal("follower read completed cleanly after uploader failure")
-	}
-}
-
-func TestConcurrentPutConflicts(t *testing.T) {
-	ts, _ := newTestServer(t)
-	cr := createUpload(t, ts, "a.txt", "", 365)
-
-	pr, pw := io.Pipe()
-	defer pw.Close()
-	go func() {
-		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/put/"+cr.ID, pr)
-		req.Header.Set("Authorization", "Bearer "+testKey)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-	pw.Write([]byte("x")) // ensure the first PUT has attached
-	time.Sleep(50 * time.Millisecond)
-
-	if resp := putBytes(t, ts, cr.ID, []byte("interloper")); resp.StatusCode != http.StatusConflict {
-		t.Fatalf("second put: status %d, want 409", resp.StatusCode)
 	}
 }
 
@@ -469,8 +453,7 @@ func TestNotFoundAndInvalidIDs(t *testing.T) {
 
 func TestDeleteEndpoint(t *testing.T) {
 	ts, _ := newTestServer(t)
-	cr := createUpload(t, ts, "gone.txt", "delete me", 365)
-	putBytes(t, ts, cr.ID, []byte("bye"))
+	cr := upload(t, ts, "gone.txt", "delete me", 365, []byte("bye"))
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/file/"+cr.ID, nil)
 	req.Header.Set("Authorization", "Bearer "+testKey)
@@ -518,8 +501,7 @@ func TestRawSandboxByType(t *testing.T) {
 		{"clip.mp4", false},   // inert media
 	}
 	for _, tc := range cases {
-		cr := createUpload(t, ts, tc.filename, "", 365)
-		putBytes(t, ts, cr.ID, []byte("data"))
+		cr := upload(t, ts, tc.filename, "", 365, []byte("data"))
 
 		resp, err := http.Get(ts.URL + "/" + cr.ID + "?raw=1")
 		if err != nil {
@@ -541,10 +523,8 @@ func TestRawSandboxByType(t *testing.T) {
 
 func TestListEndpoint(t *testing.T) {
 	ts, _ := newTestServer(t)
-	named := createUpload(t, ts, "a.txt", "my notes", 365)
-	putBytes(t, ts, named.ID, []byte("aaa"))
-	unnamed := createUpload(t, ts, "b.txt", "", 365)
-	putBytes(t, ts, unnamed.ID, []byte("bbb"))
+	named := upload(t, ts, "a.txt", "my notes", 365, []byte("aaa"))
+	unnamed := upload(t, ts, "b.txt", "", 365, []byte("bbb"))
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/list?limit=10", nil)
 	req.Header.Set("Authorization", "Bearer "+testKey)
@@ -584,10 +564,9 @@ func TestListEndpoint(t *testing.T) {
 	}
 }
 
-func TestCreateWritesExpirationEntry(t *testing.T) {
+func TestUploadWritesExpirationEntry(t *testing.T) {
 	ts, dataDir := newTestServer(t)
-	cr := createUpload(t, ts, "exp.txt", "", 1)
-	putBytes(t, ts, cr.ID, []byte("x"))
+	cr := upload(t, ts, "exp.txt", "", 1, []byte("x"))
 
 	name := filepath.Join(dataDir, "expirations", time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02"))
 	data, err := os.ReadFile(name)
@@ -601,8 +580,7 @@ func TestCreateWritesExpirationEntry(t *testing.T) {
 
 func TestNeverExpireWritesNoEntry(t *testing.T) {
 	ts, dataDir := newTestServer(t)
-	cr := createUpload(t, ts, "keep.txt", "", 0)
-	putBytes(t, ts, cr.ID, []byte("x"))
+	upload(t, ts, "keep.txt", "", 0, []byte("x"))
 
 	entries, err := os.ReadDir(filepath.Join(dataDir, "expirations"))
 	if err != nil {
@@ -642,13 +620,13 @@ func TestAPIRequiresBearerKey(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	// No Authorization header at all.
-	resp, err := http.Post(ts.URL+"/api/create", "application/json", strings.NewReader(`{"filename":"x.txt"}`))
+	resp, err := http.Post(ts.URL+"/api/upload?filename=x.txt", "application/octet-stream", strings.NewReader("data"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("keyless create: status %d, want 401", resp.StatusCode)
+		t.Fatalf("keyless upload: status %d, want 401", resp.StatusCode)
 	}
 
 	// A bogus key is rejected.

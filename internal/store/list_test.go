@@ -17,7 +17,8 @@ func TestListNewestFirstAcrossMonths(t *testing.T) {
 	// Days 0 (2000-01) and 40 (2000-02) land in different month dirs.
 	old := uploadNamed(t, s, 0, "aaaaaa", "old-file")
 	newer := uploadNamed(t, s, 40, "bbbbbb", "new-file")
-	// Unnamed uploads are listed too. Within day 40, "cccccc" sorts newest.
+	// Unnamed uploads are listed too. It's uploaded last, so by mtime it
+	// sorts newest among day 40's entries, ahead of "newer".
 	unnamed := mustUpload(t, s, FileID{Day: 40, Nonce: "cccccc", Ext: "txt"}, time.Time{})
 
 	entries, next, err := s.List("", 10)
@@ -43,15 +44,19 @@ func TestListNewestFirstAcrossMonths(t *testing.T) {
 
 func TestListPaginationAcrossMonthBoundary(t *testing.T) {
 	s := newTestStore(t)
-	var want []string
-	// Newest first: day 40 entries sort before day 0 entries.
+	// Upload order (also mtime order): day 40's zzzzzz, mmmmmm, aaaaaa, then
+	// day 0's zzzzzz, aaaaaa. Newest first means day 40 sorts before day 0,
+	// and within a day, most-recently-uploaded (by mtime) sorts first — the
+	// reverse of upload order, not the nonces' alphabetical order.
+	var uploaded []string
 	for _, f := range []struct {
 		day   int
 		nonce string
 	}{{40, "zzzzzz"}, {40, "mmmmmm"}, {40, "aaaaaa"}, {0, "zzzzzz"}, {0, "aaaaaa"}} {
 		id := uploadNamed(t, s, f.day, f.nonce, "file")
-		want = append(want, id.String())
+		uploaded = append(uploaded, id.String())
 	}
+	want := []string{uploaded[2], uploaded[1], uploaded[0], uploaded[4], uploaded[3]}
 
 	var got []string
 	cursor := ""
@@ -83,6 +88,43 @@ func TestListPaginationAcrossMonthBoundary(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("entry %d: got %s, want %s", i, got[i], want[i])
 		}
+	}
+}
+
+func TestListCursorSurvivesDeletedFile(t *testing.T) {
+	s := newTestStore(t)
+	var uploaded []string
+	for _, nonce := range []string{"zzzzzz", "mmmmmm", "aaaaaa"} {
+		id := uploadNamed(t, s, 40, nonce, "file")
+		uploaded = append(uploaded, id.String())
+	}
+	// Newest-by-mtime is uploaded[2], then [1], then [0].
+	first, cursor, err := s.List("", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].ID != uploaded[2] {
+		t.Fatalf("got %+v, want first entry %s", first, uploaded[2])
+	}
+
+	// Delete the file the cursor points at before resuming the page.
+	fid, err := ParseID(uploaded[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(fid); err != nil {
+		t.Fatal(err)
+	}
+
+	rest, next, err := s.List(cursor, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "" {
+		t.Fatalf("unexpected nextCursor %q", next)
+	}
+	if len(rest) != 2 || rest[0].ID != uploaded[1] || rest[1].ID != uploaded[0] {
+		t.Fatalf("got %+v, want [%s, %s]", rest, uploaded[1], uploaded[0])
 	}
 }
 

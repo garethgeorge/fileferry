@@ -9,9 +9,9 @@ services — just a binary and a data directory.
 
 ## Features
 
-- **Instant share links** — the URL is returned the moment an upload starts.
-  Downloaders tail-follow uploads in progress, so large files can be shared
-  before the transfer finishes.
+- **Instant share links** — the share URL streams back in the upload response
+  before the transfer finishes, and downloaders tail-follow uploads in progress,
+  so large files can be shared while they're still being sent.
 - **Drop, paste, or type** — drag files into the dropzone, paste text or a
   screenshot anywhere on the page, or type a snippet inline.
 - **Optional client-side encryption** — AES-256-GCM with a random key generated
@@ -105,16 +105,18 @@ share links are correct.
 
 ### Uploading from the terminal
 
-Create a slot, then `PUT` the bytes, authenticating with a key from
-`FILEFERRY_API_KEY`. Needs [`jq`](https://jqlang.github.io/jq/):
+Send the file with a single `POST`, streaming the bytes as the request body and
+authenticating with a key from `FILEFERRY_API_KEY`:
 
 ```sh
 KEY=your-api-key; BASE=https://files.example.com; F=./notes.txt
-ID=$(curl -sS $BASE/api/create -H "Authorization: Bearer $KEY" \
-  -d "{\"filename\":\"$(basename "$F")\"}" | jq -r .id)
-curl -sS -X PUT $BASE/api/put/$ID -H "Authorization: Bearer $KEY" --data-binary @"$F"
-echo $BASE/$ID
+curl -sS -X POST "$BASE/api/upload?filename=$(basename "$F")" \
+  -H "Authorization: Bearer $KEY" --data-binary @"$F" | jq -r .url
 ```
+
+The raw response is `{"id":...,"url":...}`;
+[`jq`](https://jqlang.github.io/jq/) is only needed here to pluck `.url` out of
+that JSON.
 
 ### macOS: upload the clipboard with a keybind
 
@@ -128,10 +130,9 @@ an image if the clipboard holds one (via [`pngpaste`](https://github.com/jcsalte
 KEY=your-api-key; BASE=https://files.example.com
 if pngpaste - >/tmp/ff.png 2>/dev/null; then F=/tmp/ff.png; N=clip.png
 else pbpaste >/tmp/ff.txt; F=/tmp/ff.txt; N=clip.txt; fi
-ID=$(curl -sS $BASE/api/create -H "Authorization: Bearer $KEY" \
-  -d "{\"filename\":\"$N\"}" | jq -r .id)
-curl -sS -X PUT $BASE/api/put/$ID -H "Authorization: Bearer $KEY" --data-binary @"$F"
-printf '%s' "$BASE/$ID" | pbcopy
+URL=$(curl -sS -X POST "$BASE/api/upload?filename=$N" \
+  -H "Authorization: Bearer $KEY" --data-binary @"$F" | jq -r .url)
+printf '%s' "$URL" | pbcopy
 ```
 
 Bind it to a hotkey natively:
