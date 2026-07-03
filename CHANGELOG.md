@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/garethgeorge/fileferry/compare/v1.1.0...v1.2.0) (2026-07-03)
+
+
+### Features
+
+* API keys, better ui, simplified API ([a864eb7](https://github.com/garethgeorge/fileferry/commit/a864eb71a3ed5547de256612cd6c0acc3611692d))
+
+
+### Bug Fixes
+
+* sort behavior uses atime to sort within a day ([71b4146](https://github.com/garethgeorge/fileferry/commit/71b4146044d19863c9df520c6f54216e06dd3a91))
+
 ## [1.1.0](https://github.com/garethgeorge/fileferry/compare/v1.0.0...v1.1.0) (2026-07-02)
 
 
