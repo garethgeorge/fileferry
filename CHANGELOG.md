@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0](https://github.com/garethgeorge/fileferry/compare/v1.2.0...v1.3.0) (2026-07-03)
+
+
+### Features
+
+* allow seeking in encrypted archives ([59d4a7e](https://github.com/garethgeorge/fileferry/commit/59d4a7ee84e396ce8148b4f28ee477d3dcacb407))
+* new ferryupload binary for easy uploads, link shortening, various refactors ([412da64](https://github.com/garethgeorge/fileferry/commit/412da64def3b7b0bf962adcb2899d14d3758dba4))
+
+
+### Bug Fixes
+
+* support uploading files from clipboard ([1c2475c](https://github.com/garethgeorge/fileferry/commit/1c2475c06d49bfaed7ebba2baa600d0899e1ce0e))
+
 ## [1.2.0](https://github.com/garethgeorge/fileferry/compare/v1.1.0...v1.2.0) (2026-07-03)
 
 
