@@ -17,7 +17,8 @@ import (
 
 const (
 	// maxArchivePreviewSize caps the archive size we will read; larger files
-	// fall through to a raw download.
+	// fall through to a raw download. It also bounds how much we buffer in
+	// memory for sources that don't support random access (see ServeHTTP).
 	maxArchivePreviewSize = 128 << 20 // 128 MiB
 	// maxArchiveEntries caps how many entries we list, bounding the response.
 	maxArchiveEntries = 10000
@@ -64,9 +65,14 @@ func (a *archive) Matches(f File) bool {
 	return false
 }
 
-// ServeHTTP reads f, lists its entries, and writes an HTML listing. Content
-// that does not parse as the expected archive (e.g. a plain .gz file) is served
-// raw instead.
+// ServeHTTP reads f and writes an HTML listing of its entries. When the
+// underlying content supports random access (true for any file backed by
+// local disk) it is scanned directly, without buffering the archive into
+// memory: zip reads only its central directory via io.ReaderAt, and tar/gzip
+// are walked as a stream. Sources that don't support random access (e.g. a
+// decrypting stream) fall back to buffering up to maxArchivePreviewSize, same
+// as before. Content that does not parse as the expected archive (e.g. a
+// plain .gz file) is served raw instead.
 func (a *archive) ServeHTTP(w http.ResponseWriter, r *http.Request, f File) error {
 	rc, err := f.Open()
 	if err != nil {
@@ -74,14 +80,50 @@ func (a *archive) ServeHTTP(w http.ResponseWriter, r *http.Request, f File) erro
 	}
 	defer rc.Close()
 
-	data, err := io.ReadAll(io.LimitReader(rc, maxArchivePreviewSize))
-	if err != nil {
-		return err
+	ext := strings.ToLower(f.Ext)
+	ra, hasReaderAt := rc.(io.ReaderAt)
+	rs, seekable := rc.(io.ReadSeeker)
+
+	// rawFallback rewinds a seekable source and serves it as a plain
+	// download. Only called from branches that established seekable == true,
+	// so rs is always non-nil where it's used.
+	rawFallback := func() error {
+		if _, serr := rs.Seek(0, io.SeekStart); serr != nil {
+			return serr
+		}
+		return serveRawStream(w, r, f, rs)
 	}
 
-	kind, entries, truncated, err := listArchive(strings.ToLower(f.Ext), data)
-	if errors.Is(err, errNotArchive) {
-		return serveRawBytes(w, r, f, data)
+	var kind string
+	var entries []archiveEntry
+	var truncated bool
+
+	switch {
+	case ext == "zip" && hasReaderAt && seekable:
+		kind = "zip"
+		entries, truncated, err = listZip(ra, f.Size)
+		if errors.Is(err, errNotArchive) {
+			return rawFallback()
+		}
+	case seekable:
+		kind, entries, truncated, err = listTarStream(ext, io.LimitReader(rc, maxArchivePreviewSize))
+		if errors.Is(err, errNotArchive) {
+			return rawFallback()
+		}
+	default:
+		data, rerr := io.ReadAll(io.LimitReader(rc, maxArchivePreviewSize))
+		if rerr != nil {
+			return rerr
+		}
+		if ext == "zip" {
+			kind = "zip"
+			entries, truncated, err = listZip(bytes.NewReader(data), int64(len(data)))
+		} else {
+			kind, entries, truncated, err = listTarStream(ext, bytes.NewReader(data))
+		}
+		if errors.Is(err, errNotArchive) {
+			return serveRawBytes(w, r, f, data)
+		}
 	}
 	if err != nil {
 		return err
@@ -113,26 +155,22 @@ func (a *archive) ServeHTTP(w http.ResponseWriter, r *http.Request, f File) erro
 	return err
 }
 
-// listArchive dispatches on extension. It returns errNotArchive when the bytes
-// are not the expected format so the caller can fall back to raw serving.
-func listArchive(ext string, data []byte) (kind string, entries []archiveEntry, truncated bool, err error) {
-	switch ext {
-	case "zip":
-		entries, truncated, err = listZip(data)
-		return "zip", entries, truncated, err
-	default: // tar, tgz, gz
-		gzipped := ext != "tar"
-		entries, truncated, err = listTar(data, gzipped)
-		kind = "tar"
-		if gzipped {
-			kind = "tar.gz"
-		}
-		return kind, entries, truncated, err
+// listTarStream dispatches tar/tgz/gz by extension and walks the entries as a
+// stream; it never buffers the whole archive.
+func listTarStream(ext string, src io.Reader) (kind string, entries []archiveEntry, truncated bool, err error) {
+	gzipped := ext != "tar"
+	entries, truncated, err = listTar(src, gzipped)
+	kind = "tar"
+	if gzipped {
+		kind = "tar.gz"
 	}
+	return kind, entries, truncated, err
 }
 
-func listZip(data []byte) (entries []archiveEntry, truncated bool, err error) {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+// listZip reads only the central directory (via ra), so memory use is
+// proportional to the entry count, not the archive size.
+func listZip(ra io.ReaderAt, size int64) (entries []archiveEntry, truncated bool, err error) {
+	zr, err := zip.NewReader(ra, size)
 	if err != nil {
 		return nil, false, errNotArchive
 	}
@@ -152,8 +190,7 @@ func listZip(data []byte) (entries []archiveEntry, truncated bool, err error) {
 	return entries, false, nil
 }
 
-func listTar(data []byte, gzipped bool) (entries []archiveEntry, truncated bool, err error) {
-	var src io.Reader = bytes.NewReader(data)
+func listTar(src io.Reader, gzipped bool) (entries []archiveEntry, truncated bool, err error) {
 	if gzipped {
 		gz, gerr := gzip.NewReader(src)
 		if gerr != nil {
@@ -187,8 +224,19 @@ func listTar(data []byte, gzipped bool) (entries []archiveEntry, truncated bool,
 	}
 }
 
-// serveRawBytes serves already-read content as a plain download when it turned
-// out not to be a previewable archive.
+// serveRawStream serves a seekable source (already rewound to the start) as a
+// plain download, supporting range requests.
+func serveRawStream(w http.ResponseWriter, r *http.Request, f File, rs io.ReadSeeker) error {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if f.MimeType != "" {
+		w.Header().Set("Content-Type", f.MimeType)
+	}
+	http.ServeContent(w, r, f.ID, time.Time{}, rs)
+	return nil
+}
+
+// serveRawBytes serves already-buffered content as a plain download when it
+// turned out not to be a previewable archive.
 func serveRawBytes(w http.ResponseWriter, r *http.Request, f File, data []byte) error {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if f.MimeType != "" {

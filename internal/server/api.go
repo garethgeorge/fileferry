@@ -103,7 +103,10 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A custom extension in the URL suffix only overrides the file's own
-	// extension for textual content, where relabeling is lossless.
+	// extension for textual content, where relabeling is lossless. This is how
+	// a client marks a pasted URL as a short-link redirect: it uploads with
+	// filename "link.link" (see preview.NewRedirect), no server-side content
+	// inspection required.
 	fileExt := strings.TrimPrefix(filepath.Ext(filename), ".")
 	contentIsText := strings.HasPrefix(preview.MimeTypeForExt(fileExt), "text/")
 	id := store.NewID(time.Now(), slug, filename, contentIsText)

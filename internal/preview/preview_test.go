@@ -80,8 +80,8 @@ func TestTextServeHTTP(t *testing.T) {
 	if strings.Contains(body, raw) {
 		t.Errorf("body contains unescaped raw content %q", raw)
 	}
-	if !strings.Contains(body, "?raw=1") {
-		t.Errorf("body missing raw link ?raw=1")
+	if !strings.Contains(body, "/raw/") {
+		t.Errorf("body missing raw link /raw/")
 	}
 }
 
@@ -223,7 +223,7 @@ func TestArchiveGzFallbackNotTar(t *testing.T) {
 		Ext:      "gz",
 		MimeType: "application/gzip",
 		Size:     int64(gzBuf.Len()),
-		Open:     func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(gzBuf.Bytes())), nil },
+		Open:     func() (io.ReadCloser, error) { return seekableCloser{bytes.NewReader(gzBuf.Bytes())}, nil },
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/"+f.ID, nil)
@@ -237,7 +237,51 @@ func TestArchiveGzFallbackNotTar(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "<table") {
 		t.Errorf("plain gzip should not render an archive listing")
 	}
+	if got := rec.Body.String(); got != string(gzBuf.Bytes()) {
+		t.Errorf("fallback body does not match original content")
+	}
 }
+
+// TestArchiveNonSeekableSource covers the buffered fallback used when the
+// source doesn't support random access (e.g. a decrypting stream): archive.go
+// must still list entries correctly without a Seeker/ReaderAt available.
+func TestArchiveNonSeekableSource(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w1, _ := zw.Create("hello.txt")
+	w1.Write([]byte("hello world"))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewArchive()
+	f := File{
+		ID:       "ap-abc123.zip",
+		Ext:      "zip",
+		MimeType: "application/zip",
+		Size:     int64(buf.Len()),
+		// io.NopCloser erases ReaderAt/Seeker even though bytes.Reader has
+		// them, mirroring a genuinely non-seekable stream (e.g. decrypting a
+		// completed upload).
+		Open: func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf.Bytes())), nil },
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/"+f.ID, nil)
+	if err := p.ServeHTTP(rec, req, f); err != nil {
+		t.Fatalf("ServeHTTP error: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "hello.txt") {
+		t.Errorf("missing file entry:\n%s", rec.Body.String())
+	}
+}
+
+// seekableCloser adapts a *bytes.Reader (which supports ReaderAt/Seeker, like
+// the *os.File a real upload is backed by) into an io.ReadCloser, so tests
+// exercise the streaming/random-access code path rather than the buffered
+// fallback used for non-seekable sources.
+type seekableCloser struct{ *bytes.Reader }
+
+func (seekableCloser) Close() error { return nil }
 
 // serveArchive runs the archive previewer over data and returns the body.
 func serveArchive(t *testing.T, id, ext string, data []byte) string {
@@ -248,7 +292,7 @@ func serveArchive(t *testing.T, id, ext string, data []byte) string {
 		Ext:      ext,
 		MimeType: "application/octet-stream",
 		Size:     int64(len(data)),
-		Open:     func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil },
+		Open:     func() (io.ReadCloser, error) { return seekableCloser{bytes.NewReader(data)}, nil },
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/"+id, nil)
@@ -259,6 +303,85 @@ func serveArchive(t *testing.T, id, ext string, data []byte) string {
 		t.Errorf("Content-Type = %q, want text/html", ct)
 	}
 	return rec.Body.String()
+}
+
+func TestRedirectMatches(t *testing.T) {
+	p := NewRedirect()
+
+	cases := []struct {
+		name string
+		f    File
+		want bool
+	}{
+		{"link ext", File{Ext: "link", Size: 20}, true},
+		{"too large", File{Ext: "link", Size: maxRedirectSize + 1}, false},
+		{"other ext", File{Ext: "txt", Size: 20}, false},
+	}
+	for _, tc := range cases {
+		if got := p.Matches(tc.f); got != tc.want {
+			t.Errorf("%s: Matches = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRedirectServeHTTPValid(t *testing.T) {
+	p := NewRedirect()
+
+	const target = "https://example.com/path?q=1"
+	f := File{
+		ID:   "ap-abc123.link",
+		Ext:  "link",
+		Size: int64(len(target)),
+		Open: func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte(target + "\n"))), nil // trailing newline, as a browser paste would have
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/"+f.ID, nil)
+	if err := p.ServeHTTP(rec, req, f); err != nil {
+		t.Fatalf("ServeHTTP error: %v", err)
+	}
+
+	res := rec.Result()
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `content="2;url=`+target) {
+		t.Errorf("body missing meta-refresh to target:\n%s", body)
+	}
+	if !strings.Contains(body, `href="`+target+`"`) {
+		t.Errorf("body missing link to target:\n%s", body)
+	}
+}
+
+func TestRedirectServeHTTPInvalid(t *testing.T) {
+	p := NewRedirect()
+
+	const raw = "not a url"
+	f := File{
+		ID:   "ap-abc123.link",
+		Ext:  "link",
+		Size: int64(len(raw)),
+		Open: func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte(raw))), nil
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/"+f.ID, nil)
+	if err := p.ServeHTTP(rec, req, f); err != nil {
+		t.Fatalf("ServeHTTP error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "http-equiv=\"refresh\"") {
+		t.Errorf("invalid content should not render a meta-refresh:\n%s", body)
+	}
+	if !strings.Contains(body, "/raw/") {
+		t.Errorf("invalid content should offer a raw-content link:\n%s", body)
+	}
 }
 
 func TestRegistryFind(t *testing.T) {

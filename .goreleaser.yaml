@@ -7,7 +7,24 @@ before:
     - go mod tidy
 
 builds:
-  - env:
+  - id: server
+    main: ./cmd/ferryserver
+    binary: ferryserver
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+  - id: upload
+    main: ./cmd/ferryupload
+    binary: ferryupload
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -20,7 +37,17 @@ builds:
       - -s -w -X main.version={{ .Version }}
 
 archives:
-  - formats: [tar.gz]
+  - id: server
+    ids: [server]
+    name_template: "ferryserver_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+  - id: upload
+    ids: [upload]
+    name_template: "ferryupload_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -37,7 +64,8 @@ release:
   mode: keep-existing
 
 dockers:
-  - image_templates:
+  - ids: [server]
+    image_templates:
       - ghcr.io/garethgeorge/fileferry:{{ .Version }}-amd64
     use: buildx
     dockerfile: Dockerfile
@@ -45,7 +73,8 @@ dockers:
       - --platform=linux/amd64
       - --label=org.opencontainers.image.source=https://github.com/garethgeorge/fileferry
       - --label=org.opencontainers.image.version={{ .Version }}
-  - image_templates:
+  - ids: [server]
+    image_templates:
       - ghcr.io/garethgeorge/fileferry:{{ .Version }}-arm64
     goarch: arm64
     use: buildx

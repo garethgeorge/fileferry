@@ -2,7 +2,8 @@
 # go / tailwindcss / goreleaser versions are used without entering the shell.
 
 build:
-    nix develop -c go build -o fileferry .
+    nix develop -c go build -o ferryserver ./cmd/ferryserver
+    nix develop -c go build -o ferryupload ./cmd/ferryupload
 
 test:
     nix develop -c go test -race ./...

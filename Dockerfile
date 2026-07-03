@@ -2,9 +2,9 @@
 # into the build context, so this file must not compile anything.
 FROM gcr.io/distroless/static-debian12
 
-COPY fileferry /fileferry
+COPY ferryserver /ferryserver
 
 VOLUME /data
 EXPOSE 8080
 
-ENTRYPOINT ["/fileferry", "--addr", ":8080", "--data-dir", "/data"]
+ENTRYPOINT ["/ferryserver", "--addr", ":8080", "--data-dir", "/data"]

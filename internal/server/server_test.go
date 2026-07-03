@@ -34,7 +34,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := server.New(st, preview.NewRegistry(preview.NewText()), server.Options{
+	h := server.New(st, preview.NewRegistry(preview.NewRedirect(), preview.NewText()), server.Options{
 		MaxSize:           1 << 30,
 		DefaultExpireDays: 365,
 		APIKeys:           []string{testKey, testKey2},
@@ -170,6 +170,11 @@ func TestEncryptedRoundtrip(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/png") {
 		t.Fatalf("Content-Type = %q, want image/png (recovered from hidden filename)", ct)
 	}
+	// The URL always ends in .encr, so without a Content-Disposition filename a
+	// browser's "Save As" would save the file under the wrong extension.
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, `filename="diagram.png"`) {
+		t.Fatalf("Content-Disposition = %q, want filename=\"diagram.png\"", cd)
+	}
 }
 
 func TestEncryptedWrongKeyRefused(t *testing.T) {
@@ -293,6 +298,17 @@ func TestUploadDownloadRoundtrip(t *testing.T) {
 		t.Fatalf("CSP header = %q, want sandbox", got)
 	}
 
+	// Raw download via the /raw/{fileid} path (equivalent to ?raw=1).
+	pathResp, err := http.Get(ts.URL + "/raw/" + cr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathRaw, _ := io.ReadAll(pathResp.Body)
+	pathResp.Body.Close()
+	if string(pathRaw) != "hello world" {
+		t.Fatalf("/raw/ body = %q", pathRaw)
+	}
+
 	// Preview (default for text).
 	resp, err = http.Get(ts.URL + "/" + cr.ID)
 	if err != nil {
@@ -316,6 +332,42 @@ func TestUploadDownloadRoundtrip(t *testing.T) {
 	resp.Body.Close()
 	if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
 		t.Fatalf("Content-Disposition = %q", cd)
+	}
+}
+
+// The client marks a pasted URL as a short-link redirect by uploading it with
+// filename "link.link" (see web/static/app.js confirmShortLink); the server
+// needs no content inspection of its own to serve the redirect preview.
+func TestLinkShortcutRedirects(t *testing.T) {
+	ts, _ := newTestServer(t)
+	const target = "https://example.com/some/path?x=1"
+	cr := upload(t, ts, "link.link", "", 365, []byte(target))
+	if !strings.HasSuffix(cr.ID, ".link") {
+		t.Fatalf("id %q does not end in .link", cr.ID)
+	}
+
+	resp, err := http.Get(ts.URL + "/" + cr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html redirect page", ct)
+	}
+	if !strings.Contains(string(page), target) {
+		t.Fatalf("redirect page does not mention target %q:\n%s", target, page)
+	}
+
+	// ?raw=1 bypasses the preview and serves the stored content verbatim.
+	rawResp, err := http.Get(ts.URL + "/" + cr.ID + "?raw=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(rawResp.Body)
+	rawResp.Body.Close()
+	if string(raw) != target {
+		t.Fatalf("raw body = %q, want %q", raw, target)
 	}
 }
 

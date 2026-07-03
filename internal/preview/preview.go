@@ -79,6 +79,7 @@ var mimeOverrides = map[string]string{
 	"sql":   "text/plain",
 	"proto": "text/plain",
 	"md":    "text/markdown",
+	"link":  "text/plain",
 
 	// structured / web
 	"json": "application/json",

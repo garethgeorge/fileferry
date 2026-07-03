@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,7 +18,25 @@ import (
 	"github.com/garethgeorge/fileferry/web"
 )
 
+// noCloseFile exposes an *os.File's Read/ReadAt/Seek to a previewer while
+// making Close a no-op, since the file is owned and closed elsewhere.
+type noCloseFile struct{ *os.File }
+
+func (noCloseFile) Close() error { return nil }
+
+// handleDownload serves /{fileid}: a preview when one applies, else raw
+// content.
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	s.serveDownload(w, r, false)
+}
+
+// handleDownloadRaw serves /raw/{fileid}: always the raw stored content,
+// never a preview.
+func (s *Server) handleDownloadRaw(w http.ResponseWriter, r *http.Request) {
+	s.serveDownload(w, r, true)
+}
+
+func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request, forceRaw bool) {
 	id, err := store.ParseID(r.PathValue("fileid"))
 	if err != nil {
 		http.NotFound(w, r)
@@ -96,7 +115,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	case res.File != nil:
 		seeker = res.File
 		modTime = res.Info.ModTime()
-		previewOpen = func() (io.ReadCloser, error) { return io.NopCloser(res.File), nil }
+		// noCloseFile (not io.NopCloser) so the previewer keeps res.File's
+		// ReaderAt/Seeker: the archive previewer uses it to list zip/tar
+		// contents without buffering the whole file into memory. Close is a
+		// no-op because res.File is closed once, by the deferred res.Close()
+		// above.
+		previewOpen = func() (io.ReadCloser, error) { return noCloseFile{res.File}, nil }
 	default:
 		stream = res.Tail
 	}
@@ -104,9 +128,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	mimeType := preview.MimeTypeForExt(ext)
 
 	// HTML preview for completed files (plaintext or decrypted), unless raw/dl
-	// is forced. Encrypted preview subresources arrive with ?raw and fall
-	// through to raw serving below, decrypting again with the cookie's key.
-	if previewOpen != nil && !q.Has("raw") && !q.Has("dl") {
+	// is forced. Encrypted preview subresources arrive at /raw/{fileid} (or the
+	// legacy ?raw=1) and fall through to raw serving below, decrypting again
+	// with the cookie's key.
+	if previewOpen != nil && !forceRaw && !q.Has("raw") && !q.Has("dl") {
 		pf := preview.File{
 			ID:       id.String(),
 			Ext:      ext,
@@ -134,8 +159,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if !sandboxExempt(mimeType) {
 		w.Header().Set("Content-Security-Policy", "sandbox")
 	}
-	if q.Has("dl") {
+	switch {
+	case q.Has("dl"):
 		w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(filename)+`"`)
+	case encrypted:
+		// The URL always ends in ".encr" (the real extension is only known once
+		// decrypted), so without this a browser's "Save As" would save the
+		// recovered name under the wrong extension. filename here is the name
+		// recovered from the encrypted metadata, not the URL's id.
+		w.Header().Set("Content-Disposition", `inline; filename="`+sanitizeFilename(filename)+`"`)
 	}
 
 	if seeker != nil {

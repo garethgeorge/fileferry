@@ -119,11 +119,11 @@
           </svg>
         </summary>
         <div class="space-y-5 border-t border-slate-100 px-5 py-5">
-          <p class="text-xs text-slate-500">Uploading is a single authenticated <span class="font-mono">POST</span> to <span class="font-mono">/api/upload</span> — the share URL streams back in the JSON response before the bytes finish. These snippets carry a working key and need <span class="font-mono">jq</span>. The key below is ephemeral (it rotates when the server restarts); for a durable key set <span class="font-mono">FILEFERRY_API_KEY</span>.</p>
+          <p class="text-xs text-slate-500"><span class="font-mono">ferryupload</span> is a small standalone CLI: install it once, then upload a file, stdin, or the clipboard from anywhere. The key below is ephemeral (it rotates when the server restarts); for a durable key set <span class="font-mono">FILEFERRY_API_KEY</span>.</p>
 
           <div>
             <div class="mb-1.5 flex items-center justify-between">
-              <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">bash · reusable upload function</span>
+              <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">install</span>
               <button type="button" class="cmd-copy shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50" data-target="cmd-curl">Copy</button>
             </div>
             <pre id="cmd-curl" class="overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 text-xs leading-relaxed text-slate-100"><code></code></pre>
@@ -155,6 +155,45 @@
     </section>
 
   </main>
+
+  <!-- Short-link confirmation modal (shown when pasted text is a URL; see
+       app.js confirmShortLink). Positioning/backdrop/max-width are inline
+       styles rather than Tailwind utility classes because tailwind.css is a
+       precompiled, checked-in file (see justfile's `css` recipe) and these
+       particular utilities aren't already present in it. -->
+  <div id="link-modal" class="hidden flex items-center justify-center px-4"
+    style="position: fixed; inset: 0; z-index: 50; background: rgba(15, 23, 42, 0.45);">
+    <div class="w-full rounded-2xl border border-slate-200 bg-white p-4 shadow-sm" style="max-width: 24rem;">
+      <h3 class="text-sm font-semibold text-slate-900">Serve as a short link?</h3>
+      <p id="link-modal-url" class="mt-2 font-mono text-xs text-slate-500" style="overflow-wrap: anywhere;"></p>
+      <p class="mt-2 text-xs text-slate-400">Visiting the share link will redirect to this URL instead of showing it as text.</p>
+      <div class="mt-4 flex items-center gap-2" style="justify-content: flex-end;">
+        <button id="link-modal-cancel" type="button"
+          class="rounded-md px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">Just paste as text</button>
+        <button id="link-modal-confirm" type="button"
+          class="rounded-md bg-indigo-600 px-3.5 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-700">Create short link</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manifest confirmation modal (shown when several files are added at once;
+       see app.js confirmManifest / uploadBundleWithManifest). Same inline-style
+       rationale as the short-link modal above. -->
+  <div id="manifest-modal" class="hidden flex items-center justify-center px-4"
+    style="position: fixed; inset: 0; z-index: 50; background: rgba(15, 23, 42, 0.45);">
+    <div class="w-full rounded-2xl border border-slate-200 bg-white p-4 shadow-sm" style="max-width: 24rem;">
+      <h3 class="text-sm font-semibold text-slate-900">Create a manifest?</h3>
+      <p id="manifest-modal-count" class="mt-2 text-xs text-slate-500"></p>
+      <p class="mt-2 text-xs text-slate-400">A <span class="font-mono">manifest.md</span> linking to every file in the bundle will be uploaded, and <span class="font-medium">its</span> link copied to your clipboard.</p>
+      <div class="mt-4 flex items-center gap-2" style="justify-content: flex-end;">
+        <button id="manifest-modal-cancel" type="button"
+          class="rounded-md px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">Upload separately</button>
+        <button id="manifest-modal-confirm" type="button"
+          class="rounded-md bg-indigo-600 px-3.5 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-700">Create manifest</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/upload/config.js"></script>
   <script src="/upload/static/app.js"></script>
 </body>

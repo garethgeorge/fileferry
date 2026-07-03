@@ -28,6 +28,14 @@ const preserveToggle = document.getElementById("preserve-toggle");
 const optionsToggle = document.getElementById("options-toggle");
 const optionsPanel = document.getElementById("options-panel");
 const optionsChevron = document.getElementById("options-chevron");
+const linkModal = document.getElementById("link-modal");
+const linkModalUrl = document.getElementById("link-modal-url");
+const linkModalConfirm = document.getElementById("link-modal-confirm");
+const linkModalCancel = document.getElementById("link-modal-cancel");
+const manifestModal = document.getElementById("manifest-modal");
+const manifestModalCount = document.getElementById("manifest-modal-count");
+const manifestModalConfirm = document.getElementById("manifest-modal-confirm");
+const manifestModalCancel = document.getElementById("manifest-modal-cancel");
 
 // ---- Helpers --------------------------------------------------------------
 // sanitizeSuffix mirrors what the server does to the URL suffix: lowercase and
@@ -219,13 +227,52 @@ async function copyToClipboard(text, btn) {
   }
 }
 
+// confirmModal reveals a hidden modal element and resolves to the user's
+// choice: true when the confirm button is clicked, false on cancel or a
+// backdrop click. Listeners are attached and torn down per call — only one
+// confirmation is ever in flight (uploads are user-paced through these modals).
+// Callers set the modal's body text before calling.
+function confirmModal(modalEl, confirmBtn, cancelBtn) {
+  return new Promise((resolve) => {
+    modalEl.classList.remove("hidden");
+    function finish(result) {
+      modalEl.classList.add("hidden");
+      confirmBtn.removeEventListener("click", onConfirm);
+      cancelBtn.removeEventListener("click", onCancel);
+      modalEl.removeEventListener("click", onBackdrop);
+      resolve(result);
+    }
+    function onConfirm() {
+      finish(true);
+    }
+    function onCancel() {
+      finish(false);
+    }
+    function onBackdrop(e) {
+      if (e.target === modalEl) finish(false);
+    }
+    confirmBtn.addEventListener("click", onConfirm);
+    cancelBtn.addEventListener("click", onCancel);
+    modalEl.addEventListener("click", onBackdrop);
+  });
+}
+
 // ---- Upload flow ----------------------------------------------------------
 // uploadBlob performs the whole upload in a single POST /api/upload. The server
 // streams back {id,url} before the bytes finish, so we reveal the share link
 // the moment that first line arrives (see tryReadUrl) while the progress bar
 // keeps tracking the transfer. fromFile marks real file uploads (drop / browse
 // / pasted files), which are eligible for filename-derived URL suffixes.
-async function uploadBlob(blob, filename, fromFile) {
+async function uploadBlob(blob, filename, fromFile, opts) {
+  // opts.autoCopy (default true) puts the finished share link on the clipboard.
+  // Callers batching an upload (the manifest bundle) turn it off so the manifest
+  // link — not the last file — ends up on the clipboard. Returns a promise that
+  // resolves to { id, shareUrl, filename } on success, or null on failure.
+  opts = opts || {};
+  const autoCopy = opts.autoCopy !== false;
+  let resolveDone;
+  const done = new Promise((r) => { resolveDone = r; });
+
   // A typed suffix always wins; otherwise a file upload borrows its own name
   // when the "preserve filenames" option is on.
   let slug = descriptionInput.value.trim();
@@ -248,6 +295,7 @@ async function uploadBlob(blob, filename, fromFile) {
   const copyBtn = card.querySelector(".upload-copy");
 
   let shareUrl = "";
+  let uploadedId = "";
   function showUrl(u) {
     shareUrl = u;
     urlInput.value = u;
@@ -285,6 +333,7 @@ async function uploadBlob(blob, filename, fromFile) {
     }
     if (!obj || !obj.url) return;
     urlSeen = true;
+    uploadedId = obj.id;
     if (encrypt) storeKey(obj.id, key);
     showUrl(encrypt ? obj.url + "#" + encodeURIComponent(key) : obj.url);
   }
@@ -302,15 +351,21 @@ async function uploadBlob(blob, filename, fromFile) {
       status.textContent = "done";
       status.className = "upload-status text-xs font-medium text-emerald-600";
       // Auto-copy the share URL (best-effort; copyToClipboard swallows failures).
-      if (shareUrl) copyToClipboard(shareUrl, copyBtn);
+      if (autoCopy && shareUrl) copyToClipboard(shareUrl, copyBtn);
       // Refresh the Files list from page 1.
       resetFiles();
+      resolveDone(shareUrl ? { id: uploadedId, shareUrl, filename } : null);
     } else {
       markFailed(status);
+      resolveDone(null);
     }
   };
-  xhr.onerror = () => markFailed(status);
+  xhr.onerror = () => {
+    markFailed(status);
+    resolveDone(null);
+  };
   xhr.send(blob);
+  return done;
 }
 
 function markFailed(status) {
@@ -463,18 +518,114 @@ function renderFileRow(entry) {
 browseBtn.addEventListener("click", () => fileInput.click());
 
 fileInput.addEventListener("change", () => {
-  for (const file of fileInput.files) uploadBlob(file, file.name, true);
+  handleFiles(fileInput.files);
   fileInput.value = "";
 });
 
-// Upload the textarea contents as a text file, named with the paste ext.
+// ---- URL shortener ---------------------------------------------------------
+// isShortcutCandidate reports whether text (trimmed) is, in its entirety, a
+// single absolute http(s) URL — the same bar the "Serve as a short link?"
+// prompt uses before offering the ".link" upload.
+function isShortcutCandidate(text) {
+  if (!text || /\s/.test(text)) return false;
+  let u;
+  try {
+    u = new URL(text);
+  } catch (err) {
+    return false;
+  }
+  return (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
+}
+
+// confirmShortLink fills in the short-link modal and asks whether to serve the
+// pasted URL as a redirect.
+function confirmShortLink(url) {
+  linkModalUrl.textContent = url;
+  return confirmModal(linkModal, linkModalConfirm, linkModalCancel);
+}
+
+// ---- Manifest bundle ------------------------------------------------------
+// confirmManifest fills in the manifest modal and asks whether to bundle a
+// multi-file upload into a single manifest.md.
+function confirmManifest(count) {
+  manifestModalCount.textContent =
+    count + " files added — bundle them into a shareable manifest.md?";
+  return confirmModal(manifestModal, manifestModalConfirm, manifestModalCancel);
+}
+
+// buildManifest renders the Markdown document: a bulleted list linking each
+// original filename to its uploaded share URL. Link text is escaped so a "]" or
+// "[" in a filename can't break out of the link label.
+function buildManifest(items) {
+  const esc = (s) => s.replace(/[\[\]]/g, "\\$&");
+  const lines = ["# Shared files", ""];
+  for (const it of items) lines.push("- [" + esc(it.filename) + "](" + it.shareUrl + ")");
+  return lines.join("\n") + "\n";
+}
+
+// uploadBundleWithManifest uploads every file (each gets its own upload card,
+// but none auto-copies its own link), then assembles a manifest.md pointing at
+// each share URL, uploads that too, and copies the manifest's link. Uploads run
+// concurrently; results keep the original drop order for the manifest.
+async function uploadBundleWithManifest(files) {
+  const results = await Promise.all(
+    files.map((file) =>
+      uploadBlob(file, file.name, true, { autoCopy: false }).then((res) =>
+        res && res.shareUrl ? { filename: file.name, shareUrl: res.shareUrl } : null
+      )
+    )
+  );
+  const items = results.filter(Boolean);
+  if (!items.length) return; // every upload failed; nothing to link to
+  const md = buildManifest(items);
+  // Not a file upload (fromFile false), so it keeps the manifest.md name and
+  // won't borrow a filename-derived suffix; autoCopy leaves its link on the
+  // clipboard — the whole point of the bundle.
+  await uploadBlob(new Blob([md], { type: "text/markdown" }), "manifest.md", false, {
+    autoCopy: true,
+  });
+}
+
+// handleFiles is the single entry point for files arriving via drop, browse, or
+// paste. A lone file uploads straight away; several at once prompt to bundle
+// them into a manifest first.
+function handleFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  if (files.length > 1) {
+    confirmManifest(files.length).then((yes) => {
+      if (yes) uploadBundleWithManifest(files);
+      else for (const file of files) uploadBlob(file, file.name, true);
+    });
+  } else {
+    uploadBlob(files[0], files[0].name, true);
+  }
+}
+
+// uploadPastedText shares one text file's worth of content as a new upload. If
+// it's a single URL, it first asks whether to serve it as a short-link
+// redirect (filename "link.link", picked up by the ".link" preview/redirect
+// on the server — see internal/preview/redirect.go); otherwise, or if
+// declined, it uploads as plain text.
+async function uploadPastedText(text) {
+  if (!text.trim()) return;
+  const trimmed = text.trim();
+  // Always sent as paste.txt (or link.link); a trailing extension in the URL
+  // suffix relabels the served type for text content (see
+  // internal/store/id.go splitSuffixExt). Not a file upload, so it never
+  // borrows a filename-derived suffix.
+  let filename = "paste.txt";
+  if (isShortcutCandidate(trimmed) && (await confirmShortLink(trimmed))) {
+    filename = "link.link";
+  }
+  uploadBlob(new Blob([text], { type: "text/plain" }), filename, false);
+}
+
+// Upload the textarea contents as a text file.
 function uploadText() {
   const text = textInput.value;
   if (!text.trim()) return;
-  // Always sent as paste.txt; a trailing extension in the URL suffix relabels
-  // the served type for text content (see internal/store/id.go splitSuffixExt).
-  // Not a file upload, so it never borrows a filename-derived suffix.
-  uploadBlob(new Blob([text], { type: "text/plain" }), "paste.txt", false);
+  uploadPastedText(text);
   textInput.value = "";
   syncUploadTextBtn();
   syncCompose();
@@ -532,7 +683,7 @@ textInput.addEventListener("paste", (e) => {
   const cd = e.clipboardData;
   if (cd && cd.files && cd.files.length) {
     e.preventDefault();
-    for (const file of cd.files) uploadBlob(file, file.name, true);
+    handleFiles(cd.files);
   }
 });
 
@@ -547,7 +698,7 @@ dropzone.addEventListener("drop", (e) => {
   e.preventDefault();
   dropzone.classList.remove("border-indigo-500", "bg-indigo-50");
   if (e.dataTransfer && e.dataTransfer.files) {
-    for (const file of e.dataTransfer.files) uploadBlob(file, file.name, true);
+    handleFiles(e.dataTransfer.files);
   }
 });
 
@@ -563,14 +714,11 @@ document.addEventListener("paste", (e) => {
   if (!cd) return;
 
   if (cd.files && cd.files.length) {
-    for (const file of cd.files) uploadBlob(file, file.name, true);
+    handleFiles(cd.files);
     return;
   }
   const text = cd.getData("text/plain");
-  if (text) {
-    const blob = new Blob([text], { type: "text/plain" });
-    uploadBlob(blob, "paste.txt", false);
-  }
+  if (text) uploadPastedText(text);
 });
 
 // ---- Infinite scroll ------------------------------------------------------
@@ -587,22 +735,16 @@ observer.observe(sentinel);
 // ready, then wire the per-snippet Copy buttons.
 function initTerminalSnippets() {
   const origin = window.location.origin;
-  const api = origin + "/api";
   const snippets = {
     "cmd-curl":
-`ff_upload() {
-  local key="\${FILEFERRY_API_KEY:-${API_KEY}}"
-  if [ -n "$1" ]; then
-    curl -sS -X POST "${api}/upload?filename=$(basename "$1")" \\
-      -H "Authorization: Bearer $key" --data-binary @"$1" | jq -r .url
-  else
-    curl -sS -X POST "${api}/upload?filename=paste.txt" \\
-      -H "Authorization: Bearer $key" --data-binary @- | jq -r .url
-  fi
-}`,
+`curl -fsSL https://raw.githubusercontent.com/garethgeorge/fileferry/main/install.sh | sh`,
     "cmd-stdin":
-`ff_upload ./notes.txt         # upload a file, prints its URL
-echo "hello" | ff_upload      # share text from stdin`,
+`export FILEFERRY_SERVER="${origin}"
+export FILEFERRY_API_KEY="\${FILEFERRY_API_KEY:-${API_KEY}}"
+
+ferryupload notes.txt         # upload a file, prints its URL
+echo "hello" | ferryupload    # share text from stdin
+ferryupload --clipboard       # upload the clipboard, replace it with the link`,
   };
 
   for (const [id, cmd] of Object.entries(snippets)) {

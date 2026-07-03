@@ -61,6 +61,12 @@ func New(st *store.Store, previews *preview.Registry, opts Options) http.Handler
 	mux.HandleFunc("GET /api/list", s.requireAuth(s.handleList))
 	mux.HandleFunc("DELETE /api/file/{id}", s.requireAuth(s.handleDelete))
 
+	// /raw/{fileid} always serves the stored content verbatim, skipping any
+	// HTML preview — its path ends in the file's real extension (e.g. ".png")
+	// with no query string, which embeds cleanly in <img>/<video> tags and
+	// other contexts that key off the URL suffix. ?raw=1 on the plain URL
+	// still works too, for old links.
+	mux.HandleFunc("GET /raw/{fileid}", s.handleDownloadRaw)
 	mux.HandleFunc("GET /{fileid}", s.handleDownload)
 
 	return mux

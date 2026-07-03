@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -78,7 +79,13 @@ func main() {
 	maxSize := flag.Int64("max-size", envInt64("FILEFERRY_MAX_SIZE", 10<<30), "maximum upload size in bytes")
 	defaultExpireDays := flag.Int("default-expire-days", envInt("FILEFERRY_DEFAULT_EXPIRE_DAYS", 365), "default expiration in days (0 = never)")
 	apiKey := flag.String("api-key", envStr("FILEFERRY_API_KEY", ""), "comma-separated Bearer keys accepted on /api (a random ephemeral key is always added for the web UI)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("ferryserver " + version)
+		return
+	}
 
 	// Bearer keys for /api: the operator-configured list plus one ephemeral key
 	// minted per process. The ephemeral key is what the web UI uses; since it
@@ -89,6 +96,7 @@ func main() {
 	apiKeys := append(append([]string{}, persistentKeys...), webUIKey)
 	if len(persistentKeys) == 0 {
 		log.Print("no FILEFERRY_API_KEY set: only the web UI can upload (ephemeral key); set FILEFERRY_API_KEY for scripted/API access")
+		log.Print("\tthe ephemeral key for this session is: " + webUIKey)
 	}
 
 	st, err := store.New(*dataDir)
@@ -96,7 +104,7 @@ func main() {
 		log.Fatalf("opening data dir: %v", err)
 	}
 
-	handler := server.New(st, preview.NewRegistry(preview.NewMarkdown(), preview.NewText(), preview.NewArchive()), server.Options{
+	handler := server.New(st, preview.NewRegistry(preview.NewRedirect(), preview.NewMarkdown(), preview.NewText(), preview.NewArchive()), server.Options{
 		BaseURL:           *baseURL,
 		MaxSize:           *maxSize,
 		DefaultExpireDays: *defaultExpireDays,
